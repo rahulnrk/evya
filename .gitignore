@@ -1,0 +1,59 @@
+# Junctions that duplicate nested trees
+_native/
+_ocpp/
+
+# Secrets
+.env
+.env.*
+!.env.example
+application-local.properties
+*.pem
+*.p12
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+local.properties
+id_rsa
+id_rsa.pub
+
+# Dependencies and build output
+node_modules/
+target/
+dist/
+build/
+.gradle/
+*.apk
+*.aab
+*.ipa
+*.dex
+*.class
+
+# Native / Android / iOS
+android/.gradle/
+android/app/build/
+android/build/
+ios/Pods/
+ios/build/
+*.xcuserstate
+DerivedData/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+.factorypath
+.DS_Store
+Thumbs.db
+*.log
+
+# Python / caches
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Claude / local agent noise
+.claude/
