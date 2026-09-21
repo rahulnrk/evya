@@ -108,11 +108,12 @@ const Sidebar = () => {
       { icon: CardStackIcon, label: 'RFID Management', href: '/rfid' }, 
       { icon : HeadsetIcon, label: 'Customer Support', href: '/customer-support'},
       { icon: PersonIcon, label:'Charger Installation Team ', href: '/charger-installation-team'},
-      { icon: Truck, label: 'Fleet', href: '/fleetManagement'},
+      { icon: Truck, label: 'Fleet', href: '/fleetManagement', module: 'fleet'},
       { icon: ExclamationTriangleIcon, label: 'Issues Tracker', href: '/issues-tracker' },
       { icon: PlayIcon, label: 'OCPP', href: '/ocpp' },
-      { icon: CardStackIcon, label: 'Evya Sense', href: '/evyasense' },
-      { icon: FileUpIcon, label: 'File Upload', href: '/senseupload' },
+      { icon: Share2Icon, label: 'OCPI Roaming', href: '/ocpi', module: 'ocpi' },
+      { icon: CardStackIcon, label: 'Evya Sense', href: '/evyasense', module: 'sense' },
+      { icon: FileUpIcon, label: 'File Upload', href: '/senseupload', module: 'sense' },
       // { icon: BsHeartPulse, label: "Charger Health", href: '/chargerhealth' },
       { icon: Share2Icon, label: 'Referral Codes', href: '/referral-codes' },    
       { icon: CardStackIcon, label: 'Loadmanagement', href: '/loading' },      
@@ -130,7 +131,8 @@ const Sidebar = () => {
       { icon: HeadsetIcon, label: 'Customer Support', href: '/customer-support' },
       { icon: ExclamationTriangleIcon, label: 'Issues Tracker', href: '/issues-tracker' },
       { icon: Share2Icon, label: 'Referral Codes', href: '/referral-codes' },
-      { icon: PlayIcon, label: 'OCPP', href: '/ocpp' },     
+      { icon: PlayIcon, label: 'OCPP', href: '/ocpp' },
+      { icon: Share2Icon, label: 'OCPI Roaming', href: '/ocpi', module: 'ocpi' },
       { icon: CardStackIcon, label: 'Load Management', href: '/loading' },
       // { icon: BsHeartPulse, label: "Charger Health", href: '/chargerhealth' },
     ],
@@ -176,7 +178,11 @@ const Sidebar = () => {
   };
 
   // Get menu items based on role
-  const menuItems = menuItemsByRole[roleId] || menuItemsByRole.default;
+  // ADR-003: a menu item may name a module; it shows only if the vendor has that module enabled.
+  const modules = user?.modules || [];
+  const allowed = (item) => !item.module || modules.includes(item.module);
+  const rawMenu = menuItemsByRole[roleId] || menuItemsByRole.default;
+  const menuItems = (Array.isArray(rawMenu) ? rawMenu : []).filter(allowed);
 
   return (
     <div className="w-64 h-screen bg-slate-50 border-r">

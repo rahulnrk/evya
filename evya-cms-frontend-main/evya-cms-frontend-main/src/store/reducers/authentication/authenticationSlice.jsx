@@ -6,6 +6,9 @@ const storedId = localStorage.getItem('id');
 const storedOrgId = localStorage.getItem('orgId');
 const storedRoleId = localStorage.getItem('roleId');
 const storedDesignation = localStorage.getItem('designation');
+// ADR-003: which vendor this user belongs to, and the modules they may use.
+const storedVendorId = localStorage.getItem('vendorId');
+const parseModules = () => { try { return JSON.parse(localStorage.getItem('modules')) || []; } catch { return []; } };
 
 const initialState = {
   auth: { loading: false, text: 'logging' },
@@ -21,6 +24,8 @@ const initialState = {
     token: storedToken || null,
     roleId: storedRoleId || null,
     designation: storedDesignation || null,
+    vendorId: storedVendorId || null,
+    modules: parseModules(),
   },
 };
 
@@ -39,6 +44,8 @@ export const authenticationSlice = createSlice({
         token: action.payload.token,
         roleId: action.payload.usersinroles?.[0]?.role_id || action.payload.roleId || null,
         designation: action.payload.designation || null,
+        vendorId: action.payload.vendorId ?? null,
+        modules: action.payload.modules || [],
       };
       state.isAuthenticated = true;
     },
@@ -54,11 +61,15 @@ export const authenticationSlice = createSlice({
         orgId: null,
         token: null,
         roleId: null,
+        vendorId: null,
+        modules: [],
       };
       localStorage.removeItem('authToken');
       localStorage.removeItem('orgId');
       localStorage.removeItem('id');
       localStorage.removeItem('roleId');
+      localStorage.removeItem('vendorId');
+      localStorage.removeItem('modules');
     },
     stopNotification: (state) => {
       state.loginNotification = false;
@@ -126,6 +137,14 @@ export const loginDispatcher = (userData) => async (dispatch) => {
     } else {
       localStorage.removeItem("designation");
     }
+
+    // ADR-003: the per-vendor product. Absent for EVYA admins and drivers.
+    if (data.vendorId != null) {
+      localStorage.setItem("vendorId", data.vendorId);
+    } else {
+      localStorage.removeItem("vendorId");
+    }
+    localStorage.setItem("modules", JSON.stringify(data.modules || []));
 
     dispatch(loginUserSuccess({
       ...data,

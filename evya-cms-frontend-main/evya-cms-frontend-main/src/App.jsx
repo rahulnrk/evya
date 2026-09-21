@@ -24,6 +24,7 @@ import EVUsers from './pages/evusers/EVUsers';
 import Reports from './pages/reports/Reports';
 import UserAdminProfile from './pages/user/UserAdminProfile';
 import OCPP from './pages/ocpp/OCPP';
+import Ocpi from './pages/ocpi/Ocpi';
 import Manufacturers from './pages/manufacturer/Manufacturers';
 import ManufacturerDetails from './pages/manufacturer/ManufacturerDetails';
 import EvDashboard from './evusers/EvDashboard';
@@ -109,6 +110,7 @@ const router = createBrowserRouter([
       { path: "/adminProfile", element: <UserAdminProfile /> },
       { path: "/employeeProfile", element: <EmployeeProfile /> },
       { path:"/ocpp",element:<OCPP />},
+      { path:"/ocpi",element:<Ocpi />},
       { path:"/manufacturers",element:<Manufacturers />},
       { path:"/manufacturers/:id",element:<ManufacturerDetails />},
       { path:"/addcharger/:id",element:<AddCharger/>},
