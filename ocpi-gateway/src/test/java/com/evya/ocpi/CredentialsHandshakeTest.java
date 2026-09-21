@@ -265,4 +265,21 @@ class CredentialsHandshakeTest {
         mockMvc.perform(get("/ocpi/2.2.1/credentials").header("Authorization", auth(tokenC)))
                 .andExpect(status().isUnauthorized());
     }
+
+    @Test
+    @DisplayName("A partner that publishes a disallowed module URL is not registered")
+    void disallowedModuleUrlIsRefused() throws Exception {
+        partner.publishModuleUrl("ftp://127.0.0.1/locations");
+
+        String body = mockMvc.perform(post("/ocpi/2.2.1/credentials")
+                        .header("Authorization", auth(tokenA))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(credentialsBody()))
+                .andReturn().getResponse().getContentAsString();
+
+        assertThat(json.readTree(body).path("status_code").asInt()).isEqualTo(3001);
+        PartnerConnection stored = connections.findById(connection.getId()).orElseThrow();
+        assertThat(stored.getStatus()).isEqualTo(ConnectionStatus.PENDING);
+        assertThat(stored.getTokenAHash()).isNotNull();
+    }
 }

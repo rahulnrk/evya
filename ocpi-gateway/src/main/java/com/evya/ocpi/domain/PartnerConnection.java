@@ -33,6 +33,14 @@ public class PartnerConnection {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /**
+     * Optimistic lock. The handshake writes a snapshot loaded before its outbound call to the partner;
+     * without a version, two concurrent handshakes (or a rotation racing an unregister) would both
+     * "succeed" and the last write would silently win.
+     */
+    @Version
+    private Long version;
+
     @ManyToOne(fetch = FetchType.EAGER, optional = false)
     @JoinColumn(name = "party_id_fk", nullable = false)
     private OcpiParty party;

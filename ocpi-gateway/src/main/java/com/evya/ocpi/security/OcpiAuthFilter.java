@@ -5,6 +5,7 @@ import com.evya.ocpi.api.OcpiStatus;
 import com.evya.ocpi.domain.ConnectionStatus;
 import com.evya.ocpi.domain.PartnerConnection;
 import com.evya.ocpi.domain.repo.PartnerConnectionRepository;
+import com.evya.ocpi.versions.OcpiVersion;
 import tools.jackson.databind.ObjectMapper;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -12,6 +13,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -45,16 +47,21 @@ public class OcpiAuthFilter extends OncePerRequestFilter {
     private static final Logger log = LoggerFactory.getLogger(OcpiAuthFilter.class);
     private static final String SCHEME = "Token ";
     private static final Duration LAST_SEEN_THROTTLE = Duration.ofMinutes(1);
+    private static final String VERSIONS_PATH = "/ocpi/versions";
+    private static final String CREDENTIALS_PATH = "/ocpi/" + OcpiVersion.V2_2_1 + "/credentials";
 
     private final PartnerConnectionRepository connections;
     private final TokenHasher hasher;
     private final ObjectMapper mapper;
+    private final Duration tokenATtl;
 
     public OcpiAuthFilter(PartnerConnectionRepository connections, TokenHasher hasher,
-                          ObjectMapper mapper) {
+                          ObjectMapper mapper,
+                          @Value("${ocpi.token-a.ttl-hours:168}") long tokenATtlHours) {
         this.connections = connections;
         this.hasher = hasher;
         this.mapper = mapper;
+        this.tokenATtl = Duration.ofHours(tokenATtlHours);
     }
 
     @Override
@@ -112,7 +119,7 @@ public class OcpiAuthFilter extends OncePerRequestFilter {
 
             Optional<PartnerConnection> pending = connections.findByTokenAHash(hash);
             if (pending.isPresent() && pending.get().getStatus() == ConnectionStatus.PENDING
-                    && pending.get().getParty().isActive()) {
+                    && pending.get().getParty().isActive() && !expired(pending.get())) {
                 return Optional.of(new OcpiCaller(pending.get(), true));
             }
         }
@@ -142,17 +149,42 @@ public class OcpiAuthFilter extends OncePerRequestFilter {
         return false;
     }
 
+    /**
+     * Exact paths only. A prefix or suffix match (the first version of this method) would let a Token A
+     * holder reach any future endpoint whose path merely starts with /ocpi/versions or ends with /credentials.
+     */
     private boolean isHandshakeEndpoint(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return path.startsWith("/ocpi/versions") || path.endsWith("/credentials");
+        if (path.equals(VERSIONS_PATH) || path.equals(CREDENTIALS_PATH)) {
+            return true;
+        }
+        if (path.startsWith(VERSIONS_PATH + "/")) {
+            String version = path.substring(VERSIONS_PATH.length() + 1);
+            return !version.isEmpty() && version.indexOf('/') < 0;
+        }
+        return false;
     }
 
-    /** Records liveness without a database write on every single request. */
+    /** Token A is handed over by a human; one left unused for longer than the TTL is treated as dead. */
+    private boolean expired(PartnerConnection pending) {
+        boolean expired = pending.getCreatedAt() == null
+                || pending.getCreatedAt().plus(tokenATtl).isBefore(Instant.now());
+        if (expired) {
+            log.warn("Refused an expired Token A on connection {}", pending.getId());
+        }
+        return expired;
+    }
+
+    /**
+     * Records liveness without a database write on every request, and without saving the entity: a full
+     * save would merge this authentication-time snapshot over a handshake that committed meanwhile.
+     */
     private void touch(PartnerConnection connection) {
+        Instant now = Instant.now();
         Instant lastSeen = connection.getLastSeenAt();
-        if (lastSeen == null || Duration.between(lastSeen, Instant.now()).compareTo(LAST_SEEN_THROTTLE) > 0) {
-            connection.setLastSeenAt(Instant.now());
-            connections.save(connection);
+        if (lastSeen == null || Duration.between(lastSeen, now).compareTo(LAST_SEEN_THROTTLE) > 0) {
+            connections.touchLastSeen(connection.getId(), now);
+            connection.setLastSeenAt(now);
         }
     }
 

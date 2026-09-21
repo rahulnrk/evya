@@ -7,8 +7,12 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A minimal OCPI peer for tests: serves a versions list and version details over loopback so the
@@ -17,14 +21,18 @@ import java.util.List;
 final class FakePartnerPlatform implements AutoCloseable {
 
     private final HttpServer server;
-    private final List<String> seenAuthorization = new ArrayList<>();
-    private boolean versionsBroken;
+    private final ExecutorService executor = Executors.newFixedThreadPool(4);
+    private final List<String> seenAuthorization = new CopyOnWriteArrayList<>();
+    private volatile boolean versionsBroken;
+    private volatile CyclicBarrier versionsBarrier;
+    private volatile String extraModuleUrl;
 
     FakePartnerPlatform() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/partner/versions", this::versions);
         server.createContext("/partner/2.2.1", this::versionDetails);
-        server.setExecutor(null);
+        // More than one thread: concurrency tests hold several requests open at once.
+        server.setExecutor(executor);
         server.start();
     }
 
@@ -45,8 +53,26 @@ final class FakePartnerPlatform implements AutoCloseable {
         this.versionsBroken = true;
     }
 
+    /** Holds each versions request until {@code parties} of them are in flight together. */
+    void holdVersionsUntil(int parties) {
+        this.versionsBarrier = new CyclicBarrier(parties);
+    }
+
+    /** Publishes an extra "locations" endpoint at the given URL. */
+    void publishModuleUrl(String url) {
+        this.extraModuleUrl = url;
+    }
+
     private void versions(HttpExchange exchange) throws IOException {
         seenAuthorization.add(exchange.getRequestHeaders().getFirst("Authorization"));
+        CyclicBarrier barrier = versionsBarrier;
+        if (barrier != null) {
+            try {
+                barrier.await(10, TimeUnit.SECONDS);
+            } catch (Exception timedOutOrBroken) {
+                // Let the request continue; the test's own assertions report what happened.
+            }
+        }
         if (versionsBroken) {
             respond(exchange, 500, "{\"status_code\":3000}");
             return;
@@ -59,12 +85,14 @@ final class FakePartnerPlatform implements AutoCloseable {
 
     private void versionDetails(HttpExchange exchange) throws IOException {
         seenAuthorization.add(exchange.getRequestHeaders().getFirst("Authorization"));
+        String extra = extraModuleUrl == null ? ""
+                : ",{\"identifier\":\"locations\",\"role\":\"RECEIVER\",\"url\":\"" + extraModuleUrl + "\"}";
         respond(exchange, 200, """
                 {"data":{"version":"2.2.1","endpoints":[
                    {"identifier":"credentials","role":"RECEIVER","url":"%s/partner/2.2.1/credentials"},
-                   {"identifier":"cdrs","role":"RECEIVER","url":"%s/partner/2.2.1/cdrs"}]},
+                   {"identifier":"cdrs","role":"RECEIVER","url":"%s/partner/2.2.1/cdrs"}%s]},
                  "status_code":1000,"status_message":"Success","timestamp":"2026-09-21T00:00:00Z"}
-                """.formatted(baseUrl(), baseUrl()));
+                """.formatted(baseUrl(), baseUrl(), extra));
     }
 
     private void respond(HttpExchange exchange, int status, String body) throws IOException {
@@ -79,5 +107,6 @@ final class FakePartnerPlatform implements AutoCloseable {
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();
     }
 }

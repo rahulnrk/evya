@@ -19,6 +19,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.Duration;
 import java.util.Base64;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -140,5 +142,27 @@ class OcpiAuthFilterTest {
         mockMvc.perform(get("/ocpi/versions/2.1.1").header("Authorization", auth(tokenA)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status_code").value(3002));
+    }
+
+    @Test
+    @DisplayName("Token A reaches only the exact handshake paths, not look-alikes")
+    void tokenAIsLimitedToExactHandshakePaths() throws Exception {
+        mockMvc.perform(get("/ocpi/versions-evil").header("Authorization", auth(tokenA)))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/ocpi/versions/2.2.1/extra").header("Authorization", auth(tokenA)))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/ocpi/2.2.1/tokens/credentials").header("Authorization", auth(tokenA)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    @DisplayName("A Token A left unused past its lifetime is refused")
+    void expiredTokenAIsRefused() throws Exception {
+        PartnerConnection pending = connections.findAll().get(0);
+        pending.setCreatedAt(Instant.now().minus(Duration.ofDays(8)));
+        connections.save(pending);
+
+        mockMvc.perform(get("/ocpi/versions").header("Authorization", auth(tokenA)))
+                .andExpect(status().isUnauthorized());
     }
 }

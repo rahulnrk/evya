@@ -88,6 +88,14 @@ public class PartnerVersionClient {
             String url = endpoint.path("url").asText(null);
             String role = endpoint.path("role").asText("RECEIVER");
             if (identifier != null && url != null) {
+                // Every stored endpoint passes the same guard as the versions URL, so a partner cannot
+                // plant an internal address for a later module call to hit. Re-check at call time too.
+                try {
+                    urlValidator.validate(url);
+                } catch (OcpiException e) {
+                    throw new OcpiException(OcpiStatus.UNABLE_TO_USE_CLIENT_API,
+                            "The partner published a disallowed URL for module '" + identifier + "'");
+                }
                 modules.add(new PartnerModule(identifier, role, url));
             }
         }

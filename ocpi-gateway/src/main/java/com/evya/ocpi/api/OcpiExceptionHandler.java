@@ -2,6 +2,7 @@ package com.evya.ocpi.api;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -22,6 +23,14 @@ public class OcpiExceptionHandler {
         log.warn("OCPI {} - {}", e.getStatus().code(), e.getMessage());
         return ResponseEntity.status(e.getHttpStatus())
                 .body(OcpiResponse.error(e.getStatus(), e.getMessage()));
+    }
+
+    /** Two credentials operations raced on one connection; the one that committed first stands. */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<OcpiResponse<Void>> handleConcurrentUpdate(OptimisticLockingFailureException e) {
+        log.warn("Concurrent credentials update refused: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(OcpiResponse.error(OcpiStatus.CLIENT_ERROR,
+                "The credentials were changed by a concurrent request; fetch them again before retrying"));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
