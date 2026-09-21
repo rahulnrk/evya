@@ -146,4 +146,67 @@ class LogTailServiceTest {
         assertThat(tailer.poll()).isEqualTo(1);
         assertThat(publisher.linesFor("LAB009")).containsExactly("new charger");
     }
+
+    @Test
+    @DisplayName("A line longer than the read budget is dropped whole, never shipped in pieces")
+    void overlongLineIsDroppedWhole() throws Exception {
+        properties.setMaxBytesPerPoll(64);
+        Path file = logFor("LAB001");
+        append(file, "short\n" + "x".repeat(200) + "\nafter\n");
+
+        LogTailService tailer = newTailer();
+        for (int i = 0; i < 5; i++) {
+            tailer.poll();
+        }
+
+        // Before the fix the tail of the long line was published as if it were a line of its own.
+        assertThat(publisher.linesFor("LAB001")).containsExactly("short", "after");
+    }
+
+    @Test
+    @DisplayName("An over-long line still being written waits, then is skipped once complete")
+    void unterminatedOverlongLineWaits() throws Exception {
+        properties.setMaxBytesPerPoll(64);
+        Path file = logFor("LAB001");
+        append(file, "x".repeat(200));
+
+        LogTailService tailer = newTailer();
+        assertThat(tailer.poll()).isZero();
+
+        append(file, "y".repeat(50) + "\nnext\n");
+        for (int i = 0; i < 3; i++) {
+            tailer.poll();
+        }
+
+        assertThat(publisher.linesFor("LAB001")).containsExactly("next");
+    }
+
+    @Test
+    @DisplayName("Start-at-end begins at a line boundary, so a line being written is shipped whole")
+    void startAtEndBeginsAtALineBoundary() throws Exception {
+        properties.setStartAtEnd(true);
+        Path file = logFor("LAB001");
+        append(file, "historic\npartial");
+
+        LogTailService tailer = newTailer();
+        assertThat(tailer.poll()).isZero();
+
+        append(file, " line\n");
+        tailer.poll();
+
+        assertThat(publisher.linesFor("LAB001")).containsExactly("partial line");
+    }
+
+    @Test
+    @DisplayName("A directory whose name is not a safe charger id is not shipped")
+    void unsafeDirectoryNamesAreSkipped() throws Exception {
+        append(logFor("LAB001"), "good\n");
+        Path bad = Files.createDirectories(root.resolve("BAD ID"));
+        append(bad.resolve("2026-09-21_BAD ID.txt"), "forged\n");
+
+        newTailer().poll();
+
+        assertThat(publisher.sent).extracting(RecordingPublisher.Published::chargerId)
+                .containsOnly("LAB001");
+    }
 }

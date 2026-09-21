@@ -13,6 +13,9 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
 
 /**
  * Tails the CSMS station logs and publishes each complete line to Kafka, keyed by OCPPId.
@@ -29,10 +32,18 @@ public class LogTailService {
 
     private static final Logger log = LoggerFactory.getLogger(LogTailService.class);
     private static final byte NEWLINE = (byte) '\n';
+    private static final int SCAN_CHUNK = 64 * 1024;
+
+    /**
+     * The directory name becomes a Kafka key, then a Redis key and log text in EvyaSense. Anything outside
+     * this set (control characters, whitespace, glob characters) is refused rather than shipped.
+     */
+    private static final Pattern SAFE_CHARGER_ID = Pattern.compile("^[A-Za-z0-9._:-]{1,64}$");
 
     private final ShipperProperties properties;
     private final OffsetStore offsets;
     private final LinePublisher publisher;
+    private final Set<String> reportedUnsafe = ConcurrentHashMap.newKeySet();
 
     public LogTailService(ShipperProperties properties, OffsetStore offsets, LinePublisher publisher) {
         this.properties = properties;
@@ -51,9 +62,17 @@ public class LogTailService {
         int published = 0;
         try (DirectoryStream<Path> chargers = Files.newDirectoryStream(root)) {
             for (Path chargerDir : chargers) {
-                if (Files.isDirectory(chargerDir)) {
-                    published += shipCharger(chargerDir.getFileName().toString(), chargerDir);
+                if (!Files.isDirectory(chargerDir)) {
+                    continue;
                 }
+                String chargerId = chargerDir.getFileName().toString();
+                if (!SAFE_CHARGER_ID.matcher(chargerId).matches()) {
+                    if (reportedUnsafe.add(chargerId)) {
+                        log.warn("Skipping station log directory with an unsafe name: {}", printable(chargerId));
+                    }
+                    continue;
+                }
+                published += shipCharger(chargerId, chargerDir);
             }
         } catch (IOException e) {
             log.error("Could not list station log directories under {}", root, e);
@@ -96,10 +115,12 @@ public class LogTailService {
 
             if (!offsets.isKnown(key)) {
                 if (properties.isStartAtEnd()) {
-                    // Do not replay a backlog the first time a file is seen.
-                    offsets.put(key, size);
+                    // Do not replay a backlog the first time a file is seen - but start at a line boundary,
+                    // or the rest of a line being written right now would be shipped as a fragment.
+                    long start = lastLineBoundary(file, size);
+                    offsets.put(key, start);
                     offsets.save();
-                    log.info("Tracking {} from its end ({} bytes)", file.getFileName(), size);
+                    log.info("Tracking {} from byte {} of {}", file.getFileName(), start, size);
                     return 0;
                 }
                 offset = 0;
@@ -144,10 +165,14 @@ public class LogTailService {
 
         if (lastNewline < 0) {
             if (toRead >= properties.getMaxBytesPerPoll()) {
-                // A single line longer than the read budget would otherwise stall this file forever.
-                log.warn("No line break in {} bytes of {}; skipping the chunk",
-                        toRead, file.getFileName());
-                offsets.put(key, offset + toRead);
+                // One line is longer than the read budget. Drop that whole line - never a piece of it -
+                // by finding where it ends. If it has not ended yet, wait; the offset stays on a boundary.
+                long lineEnd = findNewline(file, offset + toRead, size);
+                if (lineEnd >= 0) {
+                    log.warn("Skipped a {}-byte line in {} (over the {}-byte limit)",
+                            lineEnd + 1 - offset, file.getFileName(), properties.getMaxBytesPerPoll());
+                    offsets.put(key, lineEnd + 1);
+                }
             }
             return 0;
         }
@@ -166,5 +191,52 @@ public class LogTailService {
 
         offsets.put(key, offset + consumed);
         return published;
+    }
+
+    /** Absolute position of the first newline at or after {@code from}, or -1 if there is none yet. */
+    private long findNewline(Path file, long from, long size) throws IOException {
+        byte[] chunk = new byte[SCAN_CHUNK];
+        try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "r")) {
+            long position = from;
+            while (position < size) {
+                int n = (int) Math.min(chunk.length, size - position);
+                raf.seek(position);
+                raf.readFully(chunk, 0, n);
+                for (int i = 0; i < n; i++) {
+                    if (chunk[i] == NEWLINE) {
+                        return position + i;
+                    }
+                }
+                position += n;
+            }
+        }
+        return -1;
+    }
+
+    /** Position just after the last newline in the first {@code size} bytes, or 0 if there is none. */
+    private long lastLineBoundary(Path file, long size) throws IOException {
+        byte[] chunk = new byte[SCAN_CHUNK];
+        try (RandomAccessFile raf = new RandomAccessFile(file.toFile(), "r")) {
+            long end = size;
+            while (end > 0) {
+                int n = (int) Math.min(chunk.length, end);
+                long start = end - n;
+                raf.seek(start);
+                raf.readFully(chunk, 0, n);
+                for (int i = n - 1; i >= 0; i--) {
+                    if (chunk[i] == NEWLINE) {
+                        return start + i + 1;
+                    }
+                }
+                end = start;
+            }
+        }
+        return 0;
+    }
+
+    private static String printable(String value) {
+        StringBuilder out = new StringBuilder(value.length());
+        value.chars().forEach(c -> out.append(c >= 0x20 && c < 0x7f ? (char) c : '?'));
+        return out.toString();
     }
 }
