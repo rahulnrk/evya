@@ -28,6 +28,10 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 
 	private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
+	/** ADR-003: the platform admin role (the portal's role 1). */
+	@Value("${platform.roles.admin:1}")
+	private int adminRoleId;
+
 	@Value("${cors.allowed-origins:http://localhost:5173,http://localhost:3000,https://portal.evyaa.com,https://web.evyaa.com}")
 	private String allowedOrigins;
 
@@ -74,6 +78,8 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter {
 			// Franchise admin surface — role 4 (matches CMS client check, now enforced server-side)
 			.antMatchers("/services/station/request-franchise", "/services/**/franchise/**")
 				.hasAnyAuthority("ROLE_4", "ROLE_1", "ROLE_ADMIN")
+			// ADR-003: per-vendor modules are managed by the platform admin only
+			.antMatchers("/services/platform/**").hasAnyAuthority("ROLE_" + adminRoleId, "ROLE_ADMIN")
 			.anyRequest().authenticated()
 			.and()
 			.exceptionHandling()

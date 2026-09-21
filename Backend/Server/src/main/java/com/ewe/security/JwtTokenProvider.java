@@ -68,12 +68,28 @@ public class JwtTokenProvider {
 	}
 
 	public String createAccessToken(Long userId, Integer roleId, Long orgId, String subjectType) {
+		return createAccessToken(userId, roleId, orgId, subjectType, null, null);
+	}
+
+	/**
+	 * Access token for a portal user that also carries the vendor they belong to and the modules they may
+	 * use (ADR-003), so every service enforces the same per-vendor product without calling back here.
+	 * Null vendorId or modules are simply left out of the token.
+	 */
+	public String createAccessToken(Long userId, Integer roleId, Long orgId, String subjectType,
+			Long vendorId, java.util.List<String> modules) {
 		Map<String, Object> claims = new HashMap<>();
 		claims.put("userId", userId);
 		claims.put("roleId", roleId);
 		claims.put("orgId", orgId);
 		claims.put("type", subjectType);
 		claims.put("tokenType", TOKEN_TYPE_ACCESS);
+		if (vendorId != null) {
+			claims.put("vendorId", vendorId);
+		}
+		if (modules != null) {
+			claims.put("modules", new java.util.ArrayList<String>(modules));
+		}
 		return buildToken(claims, String.valueOf(userId), jwtExpirationMs);
 	}
 

@@ -15,6 +15,10 @@ public class AuthResponse {
 	private String designation;
 	private String username;
 	private String email;
+	/** ADR-003: the vendor this portal user belongs to (null for EVYA admins and employees). */
+	private Long vendorId;
+	/** ADR-003: optional modules this user may use. */
+	private java.util.List<String> modules;
 
 	public AuthResponse() {
 	}
@@ -99,5 +103,21 @@ public class AuthResponse {
 
 	public void setEmail(String email) {
 		this.email = email;
+	}
+
+	public Long getVendorId() {
+		return vendorId;
+	}
+
+	public void setVendorId(Long vendorId) {
+		this.vendorId = vendorId;
+	}
+
+	public java.util.List<String> getModules() {
+		return modules;
+	}
+
+	public void setModules(java.util.List<String> modules) {
+		this.modules = modules;
 	}
 }

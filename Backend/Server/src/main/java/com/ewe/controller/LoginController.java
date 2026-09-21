@@ -43,6 +43,9 @@ public class LoginController {
 	@Autowired
 	private JwtTokenProvider jwtTokenProvider;
 
+	@Autowired
+	private com.ewe.platform.VendorModuleService vendorModuleService;
+
 	@ApiOperation(value = "Unified Authentication Endpoint for Users and Employees")
 	@RequestMapping(value = "authenticate", method = RequestMethod.POST)
 	public ResponseEntity<AuthResponse> authenticate(@RequestBody LoginUser loginUser) throws Exception {
@@ -76,12 +79,18 @@ public class LoginController {
 
 		Integer roleId = resolveUserRoleId(userdetails);
 		Long orgId = userdetails.getOrgId();
-		String access = jwtTokenProvider.createAccessToken(userdetails.getId(), roleId, orgId, "USER");
+		// ADR-003: the vendor comes from the link tables, not from orgId (set from a form field).
+		Long vendorId = vendorModuleService.resolveVendorId(userdetails.getId(), roleId);
+		java.util.List<String> modules = vendorModuleService.modulesFor(roleId, vendorId);
+		String access = jwtTokenProvider.createAccessToken(userdetails.getId(), roleId, orgId, "USER", vendorId,
+				modules);
 		String refresh = jwtTokenProvider.createRefreshToken(userdetails.getId());
 
 		AuthResponse body = new AuthResponse(access, refresh, userdetails.getId(), roleId, orgId);
 		body.setUsername(userdetails.getUsername());
 		body.setEmail(userdetails.getEmail());
+		body.setVendorId(vendorId);
+		body.setModules(modules);
 		return ResponseEntity.status(HttpStatus.OK).body(body);
 	}
 

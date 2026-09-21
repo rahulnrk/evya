@@ -58,4 +58,24 @@ public class JwtTokenProviderTest {
 		ReflectionTestUtils.setField(p, "jwtSecret", "tooshort");
 		assertThrows(IllegalStateException.class, p::validateSecretAtStartup);
 	}
+
+	@Test
+	void portalAccessTokenCarriesVendorAndModules() {
+		String access = provider.createAccessToken(9L, 3, null, "USER", 7L,
+				java.util.Arrays.asList("ocpi", "load_management"));
+
+		io.jsonwebtoken.Claims claims = provider.parseClaims(access);
+		org.junit.jupiter.api.Assertions.assertEquals(7L, ((Number) claims.get("vendorId")).longValue());
+		org.junit.jupiter.api.Assertions.assertEquals(java.util.Arrays.asList("ocpi", "load_management"),
+				claims.get("modules"));
+		assertTrue(provider.validateAccessToken(access));
+	}
+
+	@Test
+	void tokensWithoutAVendorLeaveTheVendorClaimsOut() {
+		io.jsonwebtoken.Claims claims = provider.parseClaims(provider.createAccessToken(1L, 2, 1L, "MOBILE"));
+
+		assertFalse(claims.containsKey("vendorId"));
+		assertFalse(claims.containsKey("modules"));
+	}
 }
