@@ -13,7 +13,9 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
  * Turns failures into OCPI envelopes. Messages describe the request, never internal state: a partner
  * platform is an untrusted peer and error text is the cheapest way to leak topology.
  */
-@RestControllerAdvice
+// Scoped to the OCPI protocol packages: it wraps failures in the OCPI envelope. The portal API
+// (com.evya.ocpi.portal) is ordinary REST and uses Spring's default status handling instead.
+@RestControllerAdvice(basePackages = {"com.evya.ocpi.credentials", "com.evya.ocpi.versions"})
 public class OcpiExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(OcpiExceptionHandler.class);

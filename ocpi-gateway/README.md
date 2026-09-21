@@ -27,12 +27,12 @@ or country and stores lat/long as free strings; `port.connector_type` is a free 
 
 ## Run it
 
-Configuration comes from the environment; see `.env.example`. The service refuses to start without
-`OCPI_TOKEN_KEY`, and refuses every `/internal` call without `OCPI_ADMIN_API_KEY`.
+Configuration comes from the environment; see `.env.example`. The service refuses to start without `OCPI_TOKEN_KEY` or `PLATFORM_JWT_SECRET` (the platform's
+operator JWT secret, shared with the business API).
 
 ```
 export OCPI_TOKEN_KEY=$(openssl rand -base64 32)
-export OCPI_ADMIN_API_KEY=$(openssl rand -base64 32)
+export PLATFORM_JWT_SECRET=<the business API's JWT_SECRET>
 ./mvnw spring-boot:run
 ```
 
@@ -42,28 +42,35 @@ Build from a `subst` drive or a copy under `C:\evya\` (CLAUDE.md ground rule 8).
 Lab overlay: `lab/overlays/ocpi-gateway-application-lab.properties` (port 8082, MySQL on 3307, loopback
 partners allowed).
 
-## Bringing a partner on
+## Managing roaming (ADR-003)
 
-1. **Operator creates the tenant's party** — once per tenant.
-   ```
-   POST /internal/ocpi/parties        X-Api-Key: <operator key>
-   {"tenantId": 42, "countryCode": "IN", "partyId": "EVY", "role": "CPO",
-    "businessName": "Tenant Charging Pvt Ltd"}
-   ```
-2. **Operator mints Token A** for this partner. The response is the only time the token is readable.
-   ```
-   POST /internal/ocpi/connections    X-Api-Key: <operator key>
-   {"partyId": 1, "partnerLabel": "Partner BV"}
-   ```
-   A named human hands the token to the partner over an agreed channel.
-3. **The partner** calls `GET /ocpi/versions` and `GET /ocpi/versions/2.2.1` with Token A, then
-   `POST /ocpi/2.2.1/credentials` with their own token (Token B), their versions URL and their roles.
-4. **The gateway** calls the partner's versions endpoints with Token B, caches their module endpoints,
-   mints Token C, destroys Token A and answers with its own credentials object.
-5. From then on the partner authenticates with Token C; we call them with Token B. `PUT` rotates both
-   sides, `DELETE` unregisters and destroys every token on the connection.
+OCPI is a per-vendor product. A vendor turns it on in the portal only if EVYA has enabled the `ocpi`
+module for that vendor. Administration is the portal's **OCPI tab**, authenticated with the operator's
+own platform login token (the same JWT the business API issues); there is no separate API key.
 
-If the partner's API cannot be reached at step 4, nothing is written and Token A stays valid for a retry.
+`/portal/**` (vendor self-service, platform JWT):
+
+| Endpoint | Who | Does |
+|---|---|---|
+| `GET /portal/ocpi/party` | vendor admin, or platform admin with `?vendorId=` | the vendor's OCPI party |
+| `PUT /portal/ocpi/party` | same | create or update the party (country/party id fixed once set) |
+| `GET /portal/ocpi/connections` | same | the vendor's partner connections and their status |
+| `POST /portal/ocpi/connections/invite` | same | mint a Token A to hand a partner (invite direction) |
+| `DELETE /portal/ocpi/connections/{id}` | same | end a connection; its tokens are destroyed |
+
+A vendor admin (role 3) may act only on its own vendor; the platform admin (role 1) may act on any
+vendor by naming it with `?vendorId=`. Both need the `ocpi` module. The vendor comes from the token's
+`vendorId` claim, so one vendor can never see or touch another's roaming.
+
+`/ocpi/**` (the roaming protocol) is unchanged: partners authenticate per-connection with the tokens from
+the handshake below, not the platform JWT.
+
+Once a party exists and a Token A is issued, the partner completes the handshake against `/ocpi/versions`
+and `POST /ocpi/2.2.1/credentials` exactly as before.
+
+**Not yet built:** the reverse direction — registering EVYA with a partner or hub that issued *us* a
+Token A (ADR-003 D5). That needs an OCPI client that posts our credentials to their endpoint; it is the
+next increment. Today the portal covers inviting a partner (EVYA issues Token A).
 
 ## Security decisions worth knowing
 

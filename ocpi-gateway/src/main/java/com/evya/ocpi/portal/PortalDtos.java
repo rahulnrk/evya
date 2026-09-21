@@ -1,24 +1,26 @@
-package com.evya.ocpi.admin;
+package com.evya.ocpi.portal;
 
 import com.evya.ocpi.domain.ConnectionStatus;
 import com.evya.ocpi.domain.OcpiRole;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
 
-/** Request and response shapes for the operator API. Internal only; not part of the OCPI surface. */
-public final class AdminDtos {
+/** Request and response shapes for the portal-facing OCPI API (ADR-003). */
+public final class PortalDtos {
 
-    private AdminDtos() {
+    private PortalDtos() {
     }
 
-    public record CreatePartyRequest(
-            @NotNull Long tenantId,
+    /**
+     * Create or update the caller's OCPI party. A vendor admin's {@code vendorId} is taken from the token
+     * and ignored here; a platform admin must supply it.
+     */
+    public record UpsertPartyRequest(
+            Long vendorId,
             @NotBlank @Size(min = 2, max = 2) String countryCode,
             @NotBlank @Size(min = 3, max = 3) String partyId,
-            @NotNull OcpiRole role,
             @NotBlank String businessName,
             String businessWebsite,
             String businessLogoUrl) {
@@ -26,7 +28,7 @@ public final class AdminDtos {
 
     public record PartyView(
             Long id,
-            Long tenantId,
+            Long vendorId,
             String countryCode,
             String partyId,
             OcpiRole role,
@@ -34,18 +36,13 @@ public final class AdminDtos {
             boolean active) {
     }
 
-    public record CreateConnectionRequest(
-            @NotNull Long partyId,
-            String partnerLabel) {
+    /** Invite a partner: EVYA mints a Token A for this vendor's party for the partner to use. */
+    public record InviteRequest(String partnerLabel) {
     }
 
-    /**
-     * The only time a Token A is ever readable. It is shown once, handed to the partner out of band by
-     * a named human, and stored here as a hash only.
-     */
-    public record ConnectionCreated(
+    /** The Token A, shown once, for a human to hand to the partner out of band. */
+    public record InviteResult(
             Long connectionId,
-            Long partyId,
             String tokenA,
             String versionsUrl,
             String handoverNote) {
@@ -53,7 +50,6 @@ public final class AdminDtos {
 
     public record ConnectionView(
             Long id,
-            Long partyId,
             String partnerCountryCode,
             String partnerPartyId,
             OcpiRole partnerRole,
