@@ -1,11 +1,28 @@
 import React, { useEffect, useState } from "react";
 import axios from "axios";
 
-// ---- CHANGE THESE URLS ----
-const UPLOAD_URL = "http://localhost:8080/api/sense/ingest/upload"; // POST multipart/form-data
-const FETCH_URL = "http://localhost:8080/api/sense/read"; // GET logs
-const ISSUES_URL = "http://localhost:8080/api/anomalies/active"; // GET issues
-const CHARGER_ISSUES_BASE_URL = "http://localhost:8080/api/anomalies";
+// EvyaSense base URL: the portal's VITE_BASE_ALERTS_URL setting ("EvyaSense / alerts" in .env.example).
+// The localhost default keeps local development working as before.
+const RAW_SENSE_BASE = import.meta.env.VITE_BASE_ALERTS_URL || "http://localhost:8080";
+const SENSE_BASE = RAW_SENSE_BASE.endsWith("/") ? RAW_SENSE_BASE.slice(0, -1) : RAW_SENSE_BASE;
+const UPLOAD_URL = `${SENSE_BASE}/api/sense/ingest/upload`; // POST multipart/form-data
+const FETCH_URL = `${SENSE_BASE}/api/sense/read`; // GET logs
+const ISSUES_URL = `${SENSE_BASE}/api/anomalies/active`; // GET issues
+const CHARGER_ISSUES_BASE_URL = `${SENSE_BASE}/api/anomalies`;
+
+// EvyaSense requires the operator's login token (SEC-004): the same token the portal already sends to
+// the business API (see services/AxiosServices.jsx).
+const senseAuth = () => {
+  const token = localStorage.getItem("authToken");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+// EvyaSense explains rejections in plain text (for example, how to name an upload); show that text.
+const errorText = (e, fallback) => {
+  const data = e?.response?.data;
+  if (typeof data === "string" && data.trim()) return data;
+  return data?.message || e?.message || fallback;
+};
 
 function JsonBlock({ data }) {
   if (!data) return <div className="text-slate-400 italic">No data</div>;
@@ -199,14 +216,14 @@ export default function FileUpload() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const res = await axios.post(UPLOAD_URL, formData, { timeout: 120000 });
+      const res = await axios.post(UPLOAD_URL, formData, { timeout: 120000, headers: senseAuth() });
       if (res.status === 200) {
         setTimeout(fetchLogs, 8000);
       } else {
         setError(`Upload failed with status ${res.status}`);
       }
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || "Upload failed");
+      setError(errorText(e, "Upload failed"));
     } finally {
       setUploading(false);
     }
@@ -216,11 +233,11 @@ export default function FileUpload() {
     setLoadingLogs(true);
     setError("");
     try {
-      const res = await axios.get(FETCH_URL, { timeout: 60000 });
+      const res = await axios.get(FETCH_URL, { timeout: 60000, headers: senseAuth() });
       const data = Array.isArray(res.data) ? res.data : res.data?.data ?? [];
       setLogs(data);
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || "Failed to load logs");
+      setError(errorText(e, "Failed to load logs"));
     } finally {
       setLoadingLogs(false);
     }
@@ -230,12 +247,12 @@ export default function FileUpload() {
     setLoadingIssues(true);
     setError("");
     try {
-      const res = await axios.get(ISSUES_URL, { timeout: 60000 });
+      const res = await axios.get(ISSUES_URL, { timeout: 60000, headers: senseAuth() });
       console.log('issues res ', res);
       const data = Array.isArray(res.data) ? res.data : res.data?.data ?? [];
       setIssues(data);
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || "Failed to load issues");
+      setError(errorText(e, "Failed to load issues"));
     } finally {
       setLoadingIssues(false);
     }
@@ -250,12 +267,15 @@ export default function FileUpload() {
     setLoadingIssues(true);
     setError("");
     try {
-      const res = await axios.get(`${CHARGER_ISSUES_BASE_URL}/${chargerId}`, { timeout: 60000 });
+      const res = await axios.get(`${CHARGER_ISSUES_BASE_URL}/${encodeURIComponent(chargerId)}`, {
+        timeout: 60000,
+        headers: senseAuth(),
+      });
       console.log('charger issues res ', res);
       const data = Array.isArray(res.data) ? res.data : res.data?.data ?? [];
       setChargerIssues(data);
     } catch (e) {
-      setError(e?.response?.data?.message || e.message || "Failed to load charger issues");
+      setError(errorText(e, "Failed to load charger issues"));
     } finally {
       setLoadingIssues(false);
     }
