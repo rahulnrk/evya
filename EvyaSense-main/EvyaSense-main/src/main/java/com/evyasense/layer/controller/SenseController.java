@@ -7,6 +7,8 @@ import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.net.URL;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -29,6 +31,15 @@ public class SenseController {
 
     private static final String TOPIC = "evya-sense-topic";
 
+    // SENSE-003: the consumer attributes every line by its Kafka key, so ingestion must supply one.
+    // CSMS station logs are named <yyyy-MM-dd>_<OCPPId>.txt, which lets the charger be derived from the
+    // file name when it is not passed explicitly.
+    private static final Pattern STATION_LOG_NAME = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}_(.+)\\.txt$");
+    // The id becomes a Kafka key, a Redis key and a DB value: keep it to a safe character set.
+    private static final Pattern SAFE_CHARGER_ID = Pattern.compile("^[A-Za-z0-9._:-]{1,64}$");
+    static final String CHARGER_ID_REQUIRED = "chargerId is required: pass ?chargerId=<OCPPId>, "
+            + "or name the file <yyyy-MM-dd>_<OCPPId>.txt as the CSMS does";
+
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final SenseStore store;
 
@@ -40,7 +51,13 @@ public class SenseController {
 
     // 1️⃣ Upload file → Kafka
     @PostMapping("/ingest/upload")
-    public ResponseEntity<String> upload(@RequestParam MultipartFile file) {
+    public ResponseEntity<String> upload(@RequestParam MultipartFile file,
+                                         @RequestParam(required = false) String chargerId) {
+
+        String charger = resolveChargerId(chargerId, file.getOriginalFilename());
+        if (charger == null) {
+            return ResponseEntity.badRequest().body(CHARGER_ID_REQUIRED);
+        }
 
         // 🔥 Clear old data before new file ingestion
         store.clear();
@@ -51,7 +68,7 @@ public class SenseController {
             String line;
             while ((line = br.readLine()) != null) {
                 if (!line.trim().isEmpty()) {
-                    kafkaTemplate.send(TOPIC, line.trim());
+                    kafkaTemplate.send(TOPIC, charger, line.trim());
                 }
             }
 
@@ -65,11 +82,17 @@ public class SenseController {
     // 2️⃣ URL → Kafka
     // Fix 9: validate URL to prevent SSRF — only http/https, no private/loopback IPs
     @GetMapping("/ingest/url")
-    public ResponseEntity<String> ingestUrl(@RequestParam String url) {
+    public ResponseEntity<String> ingestUrl(@RequestParam String url,
+                                            @RequestParam(required = false) String chargerId) {
         try {
             validateUrl(url);
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body("Rejected: " + e.getMessage());
+        }
+
+        String charger = resolveChargerId(chargerId, lastPathSegment(url));
+        if (charger == null) {
+            return ResponseEntity.badRequest().body(CHARGER_ID_REQUIRED);
         }
 
         try (BufferedReader br = new BufferedReader(
@@ -78,7 +101,7 @@ public class SenseController {
             String line;
             while ((line = br.readLine()) != null) {
                 if (!line.trim().isEmpty()) {
-                    kafkaTemplate.send(TOPIC, line.trim());
+                    kafkaTemplate.send(TOPIC, charger, line.trim());
                 }
             }
             return ResponseEntity.ok("URL ingested");
@@ -114,6 +137,33 @@ public class SenseController {
         if (addr.isLoopbackAddress() || addr.isSiteLocalAddress()
                 || addr.isLinkLocalAddress() || addr.isAnyLocalAddress()) {
             throw new IllegalArgumentException("Requests to private/internal addresses are not allowed");
+        }
+    }
+
+    /**
+     * The charger for an ingestion: the explicit parameter if given, otherwise derived from a CSMS
+     * station-log file name. Returns null when neither yields a safe id.
+     */
+    static String resolveChargerId(String explicit, String fileName) {
+        String candidate = explicit == null || explicit.isBlank() ? null : explicit.trim();
+
+        if (candidate == null && fileName != null) {
+            String name = fileName.substring(Math.max(fileName.lastIndexOf('/'), fileName.lastIndexOf('\\')) + 1);
+            Matcher m = STATION_LOG_NAME.matcher(name);
+            if (m.matches()) {
+                candidate = m.group(1);
+            }
+        }
+
+        return candidate != null && SAFE_CHARGER_ID.matcher(candidate).matches() ? candidate : null;
+    }
+
+    private static String lastPathSegment(String rawUrl) {
+        try {
+            String path = new URL(rawUrl).getPath();
+            return path.substring(path.lastIndexOf('/') + 1);
+        } catch (Exception e) {
+            return null;
         }
     }
 
