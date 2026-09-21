@@ -1,5 +1,6 @@
 package com.evyasense.layer.controller;
 
+import com.evyasense.layer.ingest.IngestUrlFetcher;
 import com.evyasense.layer.kafka.SenseStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -32,7 +33,7 @@ class SenseControllerTest {
 
     @BeforeEach
     void setUp() {
-        controller = new SenseController(kafka, store);
+        controller = new SenseController(kafka, store, new IngestUrlFetcher(false, false, 1024));
     }
 
     private MockMultipartFile file(String name) {

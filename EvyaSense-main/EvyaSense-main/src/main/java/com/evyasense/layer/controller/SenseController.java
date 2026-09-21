@@ -4,8 +4,7 @@ import java.io.BufferedReader;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.net.InetAddress;
-import java.net.URL;
+import java.net.URI;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -20,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.evyasense.layer.canonical.ChargerIds;
+import com.evyasense.layer.ingest.IngestUrlFetcher;
 import com.evyasense.layer.kafka.SenseStore;
 import com.evyasense.layer.model.OcppEnvelope;
 import com.evyasense.layer.model.SenseEvent;
@@ -41,11 +41,14 @@ public class SenseController {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final SenseStore store;
+    private final IngestUrlFetcher urlFetcher;
 
     public SenseController(KafkaTemplate<String, String> kafkaTemplate,
-                           SenseStore store) {
+                           SenseStore store,
+                           IngestUrlFetcher urlFetcher) {
         this.kafkaTemplate = kafkaTemplate;
         this.store = store;
+        this.urlFetcher = urlFetcher;
     }
 
     // 1️⃣ Upload file → Kafka
@@ -78,64 +81,29 @@ public class SenseController {
         }
     }
 
-    // 2️⃣ URL → Kafka
-    // Fix 9: validate URL to prevent SSRF — only http/https, no private/loopback IPs
+    // 2  URL -> Kafka
+    // SEC-004: fetched by IngestUrlFetcher - redirects never followed, every resolved address checked,
+    // https only outside the lab, body size-capped. Internal error text is not echoed to the caller.
     @GetMapping("/ingest/url")
     public ResponseEntity<String> ingestUrl(@RequestParam String url,
                                             @RequestParam(required = false) String chargerId) {
-        try {
-            validateUrl(url);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body("Rejected: " + e.getMessage());
-        }
 
         String charger = resolveChargerId(chargerId, lastPathSegment(url));
         if (charger == null) {
             return ResponseEntity.badRequest().body(CHARGER_ID_REQUIRED);
         }
 
-        try (BufferedReader br = new BufferedReader(
-                new InputStreamReader(new URL(url).openStream()))) {
-
-            String line;
-            while ((line = br.readLine()) != null) {
-                if (!line.trim().isEmpty()) {
-                    kafkaTemplate.send(TOPIC, charger, line.trim());
-                }
-            }
-            return ResponseEntity.ok("URL ingested");
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(e.getMessage());
-        }
-    }
-
-    /**
-     * Rejects non-http(s) schemes and private/loopback/link-local IP ranges.
-     * Covers: 10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x, [::1].
-     */
-    private void validateUrl(String rawUrl) {
-        URL parsed;
         try {
-            parsed = new URL(rawUrl);
+            int lines = urlFetcher.fetchLines(url, line -> kafkaTemplate.send(TOPIC, charger, line));
+            return ResponseEntity.ok("URL ingested (" + lines + " lines)");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body("Rejected: " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return ResponseEntity.status(503).body("Interrupted while fetching the URL");
         } catch (Exception e) {
-            throw new IllegalArgumentException("Malformed URL");
-        }
-
-        String scheme = parsed.getProtocol();
-        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) {
-            throw new IllegalArgumentException("Only http and https schemes are allowed");
-        }
-
-        InetAddress addr;
-        try {
-            addr = InetAddress.getByName(parsed.getHost());
-        } catch (Exception e) {
-            throw new IllegalArgumentException("Cannot resolve host: " + parsed.getHost());
-        }
-
-        if (addr.isLoopbackAddress() || addr.isSiteLocalAddress()
-                || addr.isLinkLocalAddress() || addr.isAnyLocalAddress()) {
-            throw new IllegalArgumentException("Requests to private/internal addresses are not allowed");
+            System.err.println("URL ingest failed for charger " + charger + ": " + e);
+            return ResponseEntity.status(502).body("Could not fetch the URL");
         }
     }
 
@@ -160,8 +128,8 @@ public class SenseController {
 
     private static String lastPathSegment(String rawUrl) {
         try {
-            String path = new URL(rawUrl).getPath();
-            return path.substring(path.lastIndexOf('/') + 1);
+            String path = URI.create(rawUrl.trim()).getPath();
+            return path == null ? null : path.substring(path.lastIndexOf('/') + 1);
         } catch (Exception e) {
             return null;
         }

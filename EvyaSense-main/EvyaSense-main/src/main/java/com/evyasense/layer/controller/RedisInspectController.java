@@ -8,11 +8,15 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.Cursor;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ScanOptions;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
 import java.util.stream.Collectors;
 
+// SEC-004: raw Redis inspection is a debugging aid. It does not exist unless explicitly enabled, and
+// even then requires an operator token like every other non-public endpoint.
+@ConditionalOnProperty(name = "sense.debug-endpoints.enabled", havingValue = "true")
 @RestController
 @RequestMapping("/api/redis/inspect")
 @RequiredArgsConstructor
