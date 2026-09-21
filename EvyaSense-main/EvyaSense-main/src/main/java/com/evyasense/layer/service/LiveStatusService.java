@@ -25,6 +25,9 @@ public class LiveStatusService {
 
     public static final int MAX_IDS = 500;
 
+    static final String OFFLINE = "offline";
+    static final String UNAVAILABLE = "Unavailable";
+
     private final RedisService redisService;
 
     public List<Map<String, Object>> statusForIds(String idsCsv) {
@@ -41,7 +44,10 @@ public class LiveStatusService {
         body.put("chargerRef", chargerRef);
 
         ChargerData charger = redisService.getChargerData(chargerRef);
-        body.put("chargerStatus", charger != null ? charger.getStatus() : null);
+        String chargerStatus = charger != null ? charger.getStatus() : null;
+        // A charger EvyaSense has marked silent cannot serve a driver, whatever its ports last reported.
+        boolean offline = OFFLINE.equalsIgnoreCase(chargerStatus);
+        body.put("chargerStatus", chargerStatus);
 
         Set<String> connectorIds = redisService.getConnectorIdsForCharger(chargerRef);
         List<Map<String, Object>> ports = new ArrayList<>();
@@ -50,10 +56,14 @@ public class LiveStatusService {
 
         for (String connectorId : connectorIds) {
             ConnectorData cd = redisService.getConnectorData(chargerRef, connectorId);
-            String status = cd != null ? cd.getStatus() : null;
+            String reported = cd != null ? cd.getStatus() : null;
+            String status = offline ? UNAVAILABLE : reported;
             Map<String, Object> port = new LinkedHashMap<>();
             port.put("connectorId", connectorId);
             port.put("status", status);
+            if (offline) {
+                port.put("lastReportedStatus", reported);
+            }
             ports.add(port);
             total++;
             if (isAvailable(status)) {

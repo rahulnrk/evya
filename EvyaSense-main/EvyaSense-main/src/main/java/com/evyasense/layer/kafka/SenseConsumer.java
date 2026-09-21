@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
@@ -38,24 +39,21 @@ public class SenseConsumer {
 
     private final SenseStore store;
     private final ObjectMapper mapper = new ObjectMapper();
-private int bracketCount =0;
     private static final DateTimeFormatter LOG_TIME =
             DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss zzz yyyy", Locale.ENGLISH);
 
-    // Fix 1: LinkedHashMap preserves insertion order so getLatestSession() is deterministic.
-    // Fix 6a: capped at 500 entries to prevent unbounded memory growth.
-    private final Map<String, WebSocketContext> sessionMap = new LinkedHashMap<>(16, 0.75f, false) {
+    // SENSE-003: frame buffering is per charger, and the charger comes from the Kafka message key.
+    private final OcppFrameAssembler assembler = new OcppFrameAssembler();
+
+    // Connection facts (ip, sessionId) enriched onto events, keyed by charger. Bounded.
+    private final Map<String, WebSocketContext> contextByCharger = new LinkedHashMap<>(16, 0.75f, false) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, WebSocketContext> eldest) {
-            return size() > 500;
+            return size() > 2000;
         }
     };
 
-    // 🔥 JSON buffering (FIX)
-    private final StringBuilder jsonBuffer = new StringBuilder();
-    private int bracketDepth = 0;
-    private boolean bufferingJson = false;
-    private LocalDateTime bufferedTime;
+    private long unkeyedMessages;
     private final DataProcessorService dataProcessorService;
 
     public SenseConsumer(SenseStore store,DataProcessorService dataProcessorService) {
@@ -64,111 +62,71 @@ private int bracketCount =0;
     }
 
   
-   // Fix 2: groupId removed from annotation — uses spring.kafka.consumer.group-id from application.properties
-   @KafkaListener(topics = "evya-sense-topic")
-public void read(String line) {
+    // Fix 2: groupId removed from annotation - uses spring.kafka.consumer.group-id from application.properties
+    // SENSE-003: the charger is read from the Kafka message key, which the log shipper sets to the
+    // OCPPId. It is never inferred from whichever session was seen most recently.
+    @KafkaListener(topics = "${sense.topic:evya-sense-topic}")
+    public void read(ConsumerRecord<String, String> record) {
 
-    try {
-        System.out.println("🔥 KAFKA CONSUMED: " + line);
-        LocalDateTime logTime = extractTime(line);
+        String chargerId = record.key();
+        String line = record.value();
 
-        /* =========================================================
-           STEP 1: Normalize line (CSV / quoted JSON handling)
-           ========================================================= */
-        String workingLine = line;
-
-        int quotedJsonStart = line.indexOf("\"[");
-        int quotedJsonEnd = line.lastIndexOf("]\"");
-
-        if (quotedJsonStart != -1 && quotedJsonEnd != -1 && quotedJsonEnd > quotedJsonStart) {
-            workingLine = line
-                    .substring(quotedJsonStart + 1, quotedJsonEnd + 1)
-                    .replace("\"\"", "\""); // unescape quotes
-        }
-
-        /* =========================================================
-           STEP 2: WebSocket handshake detection
-           ========================================================= */
-        if (workingLine.contains("Headers :") && workingLine.contains("URI :")) {
-            handleHandshake(workingLine, logTime);
+        if (line == null) {
             return;
         }
-
-        if (workingLine.contains("client Ip Address")) {
-            handleClientInfo(workingLine);
-            return;
-        }
-
-        /* =========================================================
-           STEP 3: Detect start of OCPP JSON
-           ========================================================= */
-        int jsonStart = workingLine.indexOf('[');
-
-        boolean isOcppStart =
-                jsonStart != -1 &&
-                (
-                    workingLine.substring(jsonStart).startsWith("[2,") ||
-                    workingLine.substring(jsonStart).startsWith("[3,") ||
-                    workingLine.substring(jsonStart).startsWith("[4,")
-                );
-
-        if (isOcppStart) {
-            jsonBuffer.setLength(0);
-            bracketCount = 0;
-            bufferedTime = logTime;
-
-            String jsonPart = workingLine.substring(jsonStart);
-            jsonBuffer.append(jsonPart);
-
-            for (char c : jsonPart.toCharArray()) {
-                if (c == '[') bracketCount++;
-                else if (c == ']') bracketCount--;
-            }
-
-            // Single-line complete frame
-            if (bracketCount == 0) {
-            	parseOcpp(jsonBuffer.toString(), bufferedTime);
-                jsonBuffer.setLength(0);
+        if (chargerId == null || chargerId.isBlank()) {
+            // Without an identity the line cannot be attributed, and guessing is the defect this
+            // replaces. Drop it, but say so.
+            unkeyedMessages++;
+            if (unkeyedMessages % 100 == 1) {
+                System.err.println("Dropped " + unkeyedMessages
+                        + " message(s) with no charger key on evya-sense-topic");
             }
             return;
         }
 
-        /* =========================================================
-           STEP 4: Multi-line OCPP continuation
-           ========================================================= */
-        if (jsonBuffer.length() > 0) {
+        try {
+            LocalDateTime logTime = extractTime(line);
+            String workingLine = unwrapQuotedJson(line);
 
-            String trimmed = workingLine.trim();
-            jsonBuffer.append(trimmed);
-
-            for (char c : trimmed.toCharArray()) {
-                if (c == '[') bracketCount++;
-                else if (c == ']') bracketCount--;
+            if (workingLine.contains("Headers :") && workingLine.contains("URI :")) {
+                handleHandshake(chargerId, workingLine, logTime);
+                return;
             }
 
-            if (bracketCount == 0) {
-            	parseOcpp(jsonBuffer.toString(), bufferedTime);
-                jsonBuffer.setLength(0);
+            if (workingLine.contains("client Ip Address")) {
+                handleClientInfo(chargerId, workingLine);
+                return;
             }
-        }
 
-    } catch (Exception e) {
-        System.err.println("❌ Parse error: " + e.getMessage());
-        jsonBuffer.setLength(0);
-        bracketCount = 0;
-    }
-}
+            assembler.accept(chargerId, workingLine, logTime)
+                    .ifPresent(frame -> parseFrame(chargerId, frame));
 
-    // =========================
-    // JSON BRACKET COUNTER
-    // =========================
-    private void appendAndCount(String text) {
-        for (char c : text.toCharArray()) {
-            if (c == '[') bracketDepth++;
-            if (c == ']') bracketDepth--;
-            jsonBuffer.append(c);
+        } catch (Exception e) {
+            System.err.println("Parse error for charger " + chargerId + ": " + e.getMessage());
+            assembler.reset(chargerId);
         }
     }
+
+    private void parseFrame(String chargerId, OcppFrameAssembler.CompletedFrame frame) {
+        try {
+            parseOcpp(frame.json(), frame.logTime(), chargerId);
+        } catch (Exception e) {
+            System.err.println("Parse error for charger " + chargerId + ": " + e.getMessage());
+            assembler.reset(chargerId);
+        }
+    }
+
+    /** CSV-wrapped log lines quote the JSON payload and double the quotes inside it. */
+    private String unwrapQuotedJson(String line) {
+        int start = line.indexOf("\"[");
+        int end = line.lastIndexOf("]\"");
+        if (start != -1 && end != -1 && end > start) {
+            return line.substring(start + 1, end + 1).replace("\"\"", "\"");
+        }
+        return line;
+    }
+
     // Fix 6b: bounded map — entries are removed once the response is correlated,
     // and a hard cap of 10 000 prevents leaks if responses never arrive.
     private final Map<String, String> messageIdActionMap = new ConcurrentHashMap<>(16, 0.75f, 4) {
@@ -188,7 +146,7 @@ public void read(String line) {
         }
     };
     
-    private void parseOcpp(String json, LocalDateTime time) throws Exception {
+    private void parseOcpp(String json, LocalDateTime time, String chargerId) throws Exception {
 
         JsonNode arr = mapper.readTree(json);
 
@@ -361,7 +319,7 @@ public void read(String line) {
         event.setPayload(mapper.convertValue(arr.get(2), Map.class));
     }
        
-        event.setSocketContext(getLatestSession());
+        event.setSocketContext(contextFor(chargerId));
         store.add(event);
 dataProcessorService.processEvent(event);
         System.out.println("✅ STORED OCPP EVENT: " + event.getAction());
@@ -371,14 +329,18 @@ dataProcessorService.processEvent(event);
     // =========================
     // WebSocket Helpers
     // =========================
-    private void handleHandshake(String line, LocalDateTime time) {
+    private void handleHandshake(String chargerId, String line, LocalDateTime time) {
+
+        WebSocketContext ctx = contextFor(chargerId);
 
         Matcher m = Pattern.compile("URI : (.+)$").matcher(line);
-        WebSocketContext ctx = new WebSocketContext();
-
         if (m.find()) {
             String uri = m.group(1);
-            ctx.setChargerId(uri.substring(uri.lastIndexOf("/") + 1));
+            String fromUri = uri.substring(uri.lastIndexOf("/") + 1).trim();
+            if (!fromUri.isEmpty() && !fromUri.equals(chargerId)) {
+                System.err.println("Handshake URI names " + fromUri + " but the message key is "
+                        + chargerId + "; trusting the key");
+            }
         }
 
         ctx.setConnectedAt(time);
@@ -390,31 +352,33 @@ dataProcessorService.processEvent(event);
         ev.setSocketContext(ctx);
 
         store.add(ev);
+        // SENSE-002: the handshake never reached the processor before, so a connect was invisible to
+        // the anomaly rules and to the Redis live-status plane.
+        dataProcessorService.processEvent(ev);
     }
 
-    private void handleClientInfo(String line) {
+    private void handleClientInfo(String chargerId, String line) {
 
         Matcher m = Pattern.compile(
                 "client Ip Address : ([\\d.]+) , clientId : (\\w+) , sessionId : ([\\w-]+)")
                 .matcher(line);
 
         if (m.find()) {
-            WebSocketContext ctx = new WebSocketContext();
+            WebSocketContext ctx = contextFor(chargerId);
             ctx.setClientIp(m.group(1));
-            ctx.setClientId(m.group(2));
             ctx.setSessionId(m.group(3));
-            sessionMap.put(ctx.getSessionId(), ctx);
+            // clientId deliberately not taken from the log line: identity comes from the message key.
         }
     }
 
-    // Fix 1: LinkedHashMap keeps insertion order; the last entry is genuinely the most recent session.
-    private WebSocketContext getLatestSession() {
-        if (sessionMap.isEmpty()) return null;
-        WebSocketContext last = null;
-        for (WebSocketContext ctx : sessionMap.values()) {
-            last = ctx;
-        }
-        return last;
+    /** The charger's connection context, created on first sight and keyed by the OCPPId. */
+    private synchronized WebSocketContext contextFor(String chargerId) {
+        return contextByCharger.computeIfAbsent(chargerId, id -> {
+            WebSocketContext ctx = new WebSocketContext();
+            ctx.setChargerId(id);
+            ctx.setClientId(id);
+            return ctx;
+        });
     }
 
     private LocalDateTime extractTime(String line) {

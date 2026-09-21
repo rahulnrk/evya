@@ -6,6 +6,7 @@ import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import com.evyasense.layer.canonical.AnomalyType;
@@ -21,8 +22,20 @@ public class AnomalyDetectionService {
 	private final Map<String, ChargerRuntimeState> stateMap = new ConcurrentHashMap<>();
 	private final ChargerAnomalyRepository anomalyRepository;
 
+	// SENSE-004: one open outage per silent charger. The alert is raised once when the charger goes
+	// quiet and resolved when it speaks again, instead of a fresh row after every cooldown.
+	private final Map<String, SilenceEpisode> openSilence = new ConcurrentHashMap<>();
+	private final List<ChargerLivenessListener> livenessListeners;
+
 	public AnomalyDetectionService(ChargerAnomalyRepository anomalyRepository) {
+		this(anomalyRepository, List.of());
+	}
+
+	@Autowired
+	public AnomalyDetectionService(ChargerAnomalyRepository anomalyRepository,
+			List<ChargerLivenessListener> livenessListeners) {
 		this.anomalyRepository = anomalyRepository;
+		this.livenessListeners = livenessListeners;
 	}
 
 	// =========================================================
@@ -44,6 +57,17 @@ public class AnomalyDetectionService {
 			s.setChargerId(id);
 			return s;
 		});
+
+		// The health sweep reads and updates the same state from the scheduler thread.
+		synchronized (state) {
+			processLocked(state, event);
+		}
+	}
+
+	private void processLocked(ChargerRuntimeState state, SenseEvent event) {
+
+		// Any traffic at all proves the charger is alive again.
+		closeSilenceEpisode(state, event.getLogTime());
 
 		state.setLastEventTime(event.getLogTime());
 //
@@ -74,6 +98,121 @@ public class AnomalyDetectionService {
 
 		runRules(state, event.getLogTime());
 		printState(state);
+	}
+
+	// =========================================================
+	// TIME-DRIVEN EVALUATION (SENSE-004)
+	// =========================================================
+
+	/**
+	 * Evaluates every known charger against the clock.
+	 *
+	 * <p>Every rule in runRules used to fire only while a charger was still sending, so the most common
+	 * failure - a charger that goes quiet - produced no event and was therefore never reported. This
+	 * sweep is the missing trigger: it runs on a fixed tick whether or not anything arrived.
+	 *
+	 * @param now                      wall-clock time in the same zone as the CSMS log timestamps
+	 * @param silenceThresholdSeconds  how long total silence is tolerated before the charger is flagged
+	 */
+	public void sweep(LocalDateTime now, long silenceThresholdSeconds) {
+
+		for (ChargerRuntimeState state : stateMap.values()) {
+			synchronized (state) {
+				sweepLocked(state, now, silenceThresholdSeconds);
+			}
+		}
+	}
+
+	private void sweepLocked(ChargerRuntimeState state, LocalDateTime now, long silenceThresholdSeconds) {
+
+		LocalDateTime lastEvent = state.getLastEventTime();
+
+		if (lastEvent != null && !openSilence.containsKey(state.getChargerId())) {
+
+			long silentFor = Duration.between(lastEvent, now).getSeconds();
+
+			long threshold = state.getHeartbeatInterval() != null && state.getHeartbeatInterval() > 0
+					? Math.max(2L * state.getHeartbeatInterval(), silenceThresholdSeconds)
+					: silenceThresholdSeconds;
+
+			if (silentFor > threshold) {
+
+				String proof = String.format(
+						"LastEvent=%s | Now=%s | Silent=%d sec | Threshold=%d sec | Status=%s | TxId=%s",
+						lastEvent, now, silentFor, threshold, state.getCurrentStatus(),
+						state.getActiveTransactionId());
+
+				ChargerAnomaly raised = raise(AnomalyType.HEARTBEAT_TIMEOUT, state,
+						"Charger has sent nothing at all. Treat as offline.", now, proof, null);
+
+				if (raised != null) {
+					openSilence.put(state.getChargerId(), new SilenceEpisode(raised, lastEvent));
+					notifyWentSilent(state.getChargerId(), lastEvent, now);
+				}
+			}
+		}
+
+		// While a charger is silent its outage alert covers everything else time-based about it: "no
+		// meter values" from a dead charger is the outage, not a second problem every minute. The other
+		// rules resume as soon as it is heard from again.
+		if (openSilence.containsKey(state.getChargerId()))
+			return;
+
+		runRules(state, now);
+	}
+
+	/** How many chargers Sense currently holds runtime state for. */
+	public int trackedChargers() {
+		return stateMap.size();
+	}
+
+	/**
+	 * Resolves an open outage when the charger is heard from again. Lines that predate the outage (a
+	 * lagging shipper, a backfill) do not count as the charger coming back.
+	 */
+	private void closeSilenceEpisode(ChargerRuntimeState state, LocalDateTime heardAt) {
+
+		String chargerId = state.getChargerId();
+		SilenceEpisode episode = openSilence.get(chargerId);
+
+		if (episode == null || heardAt == null || !heardAt.isAfter(episode.silentSince()))
+			return;
+		if (!openSilence.remove(chargerId, episode))
+			return;
+
+		long offlineFor = Duration.between(episode.silentSince(), heardAt).getSeconds();
+
+		ChargerAnomaly anomaly = episode.anomaly();
+		anomaly.setStatus("RESOLVED");
+		anomaly.setRootCause(anomaly.getRootCause() + " | Resolved=" + heardAt
+				+ " (traffic resumed after " + offlineFor + " sec)");
+		anomalyRepository.save(anomaly);
+
+		System.out.println("Charger " + chargerId + " is talking again after " + offlineFor + " sec");
+
+		for (ChargerLivenessListener listener : livenessListeners) {
+			try {
+				listener.cameBack(chargerId, heardAt);
+			} catch (Exception e) {
+				// Detection must keep working when a store is down; the failure is reported, not hidden.
+				System.err.println("Liveness listener failed for " + chargerId + ": " + e);
+			}
+		}
+	}
+
+	private void notifyWentSilent(String chargerId, LocalDateTime silentSince, LocalDateTime detectedAt) {
+
+		for (ChargerLivenessListener listener : livenessListeners) {
+			try {
+				listener.wentSilent(chargerId, silentSince, detectedAt);
+			} catch (Exception e) {
+				System.err.println("Liveness listener failed for " + chargerId + ": " + e);
+			}
+		}
+	}
+
+	/** An open outage: the anomaly raised for it and the last time the charger was heard from. */
+	private record SilenceEpisode(ChargerAnomaly anomaly, LocalDateTime silentSince) {
 	}
 
 	// =========================================================
@@ -684,8 +823,12 @@ public class AnomalyDetectionService {
 	// =========================================================
 	// ANOMALY SAVE (Enhanced with effect and rootCause)
 	// =========================================================
-	private void raise(AnomalyType type, ChargerRuntimeState state, String effect, LocalDateTime logTime,
+	private ChargerAnomaly raise(AnomalyType type, ChargerRuntimeState state, String effect, LocalDateTime logTime,
 			String rootCause, String rawMessage) {
+
+		// An open outage already has its alert; do not stack a new row on it after every cooldown.
+		if (type == AnomalyType.HEARTBEAT_TIMEOUT && openSilence.containsKey(state.getChargerId()))
+			return null;
 
 		LocalDateTime now = logTime;
 
@@ -697,7 +840,7 @@ public class AnomalyDetectionService {
 		if (lastTime != null && Duration.between(lastTime, now).getSeconds() < 60) {
 
 			System.out.println("⚠ Spam prevented for: " + type);
-			return;
+			return null;
 		}
 
 		// -----------------------------------------
@@ -727,7 +870,7 @@ public class AnomalyDetectionService {
 
 		anomaly.setRootCause(finalRootCause);
 
-		anomalyRepository.save(anomaly);
+		ChargerAnomaly saved = anomalyRepository.save(anomaly);
 
 		System.out.println("🚨 ANOMALY DETECTED");
 		System.out.println("Type      : " + type);
@@ -737,6 +880,8 @@ public class AnomalyDetectionService {
 		System.out.println("Effect    : " + effect);
 		System.out.println("RootCause : " + finalRootCause);
 		System.out.println("LogTime   : " + logTime);
+
+		return saved != null ? saved : anomaly;
 	}
 
 	// helper method for evidence added by pavan
