@@ -1,5 +1,8 @@
 package com.evyasense.layer.kafka;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -14,6 +17,8 @@ import java.util.Optional;
  * to the OCPPId, each charger's lines arrive in order on one partition, and each gets its own buffer.
  */
 public class OcppFrameAssembler {
+
+    private static final Logger log = LoggerFactory.getLogger(OcppFrameAssembler.class);
 
     private static final int MAX_CHARGERS = 2_000;
     private static final int MAX_FRAME_CHARS = 512 * 1024;
@@ -35,6 +40,13 @@ public class OcppFrameAssembler {
         boolean startsFrame = jsonStart != -1 && isOcppStart(line.substring(jsonStart));
 
         if (startsFrame) {
+            Frame unfinished = buffers.get(chargerId);
+            if (unfinished != null && unfinished.text.length() > 0) {
+                // A new frame started before the previous one closed: the log is malformed, and the
+                // unfinished frame is lost. Say so rather than dropping it silently.
+                log.warn("Dropped an unfinished OCPP frame for charger {} ({} chars)",
+                        chargerId, unfinished.text.length());
+            }
             Frame frame = new Frame();
             frame.startedAt = logTime;
             buffers.put(chargerId, frame);

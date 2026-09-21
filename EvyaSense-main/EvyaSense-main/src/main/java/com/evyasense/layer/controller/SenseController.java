@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
+import com.evyasense.layer.canonical.ChargerIds;
 import com.evyasense.layer.kafka.SenseStore;
 import com.evyasense.layer.model.OcppEnvelope;
 import com.evyasense.layer.model.SenseEvent;
@@ -35,8 +36,6 @@ public class SenseController {
     // CSMS station logs are named <yyyy-MM-dd>_<OCPPId>.txt, which lets the charger be derived from the
     // file name when it is not passed explicitly.
     private static final Pattern STATION_LOG_NAME = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}_(.+)\\.txt$");
-    // The id becomes a Kafka key, a Redis key and a DB value: keep it to a safe character set.
-    private static final Pattern SAFE_CHARGER_ID = Pattern.compile("^[A-Za-z0-9._:-]{1,64}$");
     static final String CHARGER_ID_REQUIRED = "chargerId is required: pass ?chargerId=<OCPPId>, "
             + "or name the file <yyyy-MM-dd>_<OCPPId>.txt as the CSMS does";
 
@@ -155,7 +154,8 @@ public class SenseController {
             }
         }
 
-        return candidate != null && SAFE_CHARGER_ID.matcher(candidate).matches() ? candidate : null;
+        // Same rule as the Kafka path: the id becomes a Redis key, a DB value and log text.
+        return ChargerIds.isValid(candidate) ? candidate : null;
     }
 
     private static String lastPathSegment(String rawUrl) {

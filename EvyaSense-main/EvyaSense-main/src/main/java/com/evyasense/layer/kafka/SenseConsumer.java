@@ -16,6 +16,7 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
 import com.evyasense.layer.canonical.CanonicalNormalizer;
+import com.evyasense.layer.canonical.ChargerIds;
 import com.evyasense.layer.model.AuthorizationPayload;
 import com.evyasense.layer.model.BootNotificationPayload;
 import com.evyasense.layer.model.ChangeAvailabilityPayload;
@@ -53,7 +54,7 @@ public class SenseConsumer {
         }
     };
 
-    private long unkeyedMessages;
+    private long rejectedKeys;
     private final DataProcessorService dataProcessorService;
 
     public SenseConsumer(SenseStore store,DataProcessorService dataProcessorService) {
@@ -74,13 +75,13 @@ public class SenseConsumer {
         if (line == null) {
             return;
         }
-        if (chargerId == null || chargerId.isBlank()) {
-            // Without an identity the line cannot be attributed, and guessing is the defect this
-            // replaces. Drop it, but say so.
-            unkeyedMessages++;
-            if (unkeyedMessages % 100 == 1) {
-                System.err.println("Dropped " + unkeyedMessages
-                        + " message(s) with no charger key on evya-sense-topic");
+        if (!ChargerIds.isValid(chargerId)) {
+            // Without a trustworthy identity the line cannot be attributed: guessing is the defect this
+            // replaces, and an unchecked key would reach Redis keys and log text. Drop it, but say so.
+            rejectedKeys++;
+            if (rejectedKeys % 100 == 1) {
+                System.err.println("Dropped " + rejectedKeys + " message(s) with a missing or invalid charger "
+                        + "key on evya-sense-topic; latest: " + ChargerIds.printable(chargerId));
             }
             return;
         }
@@ -338,8 +339,8 @@ dataProcessorService.processEvent(event);
             String uri = m.group(1);
             String fromUri = uri.substring(uri.lastIndexOf("/") + 1).trim();
             if (!fromUri.isEmpty() && !fromUri.equals(chargerId)) {
-                System.err.println("Handshake URI names " + fromUri + " but the message key is "
-                        + chargerId + "; trusting the key");
+                System.err.println("Handshake URI names " + ChargerIds.printable(fromUri)
+                        + " but the message key is " + chargerId + "; trusting the key");
             }
         }
 

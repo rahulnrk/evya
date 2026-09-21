@@ -5,7 +5,13 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
 
+import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -26,16 +32,40 @@ public class AnomalyDetectionService {
 	// quiet and resolved when it speaks again, instead of a fresh row after every cooldown.
 	private final Map<String, SilenceEpisode> openSilence = new ConcurrentHashMap<>();
 	private final List<ChargerLivenessListener> livenessListeners;
+	private final Executor livenessDispatch;
 
+	/** Plain construction (tests): liveness callbacks run inline on the caller's thread. */
 	public AnomalyDetectionService(ChargerAnomalyRepository anomalyRepository) {
-		this(anomalyRepository, List.of());
+		this(anomalyRepository, List.of(), Runnable::run);
 	}
 
 	@Autowired
 	public AnomalyDetectionService(ChargerAnomalyRepository anomalyRepository,
 			List<ChargerLivenessListener> livenessListeners) {
+		this(anomalyRepository, livenessListeners, Executors.newSingleThreadExecutor(task -> {
+			Thread thread = new Thread(task, "sense-liveness");
+			thread.setDaemon(true);
+			return thread;
+		}));
+	}
+
+	/**
+	 * @param livenessDispatch runs listener callbacks (Redis, MySQL, SSE). They are submitted while the
+	 *        charger's lock is held, so a single-threaded dispatcher delivers each charger's offline/online
+	 *        transitions in order while keeping that I/O off the ingest and sweep threads.
+	 */
+	public AnomalyDetectionService(ChargerAnomalyRepository anomalyRepository,
+			List<ChargerLivenessListener> livenessListeners, Executor livenessDispatch) {
 		this.anomalyRepository = anomalyRepository;
 		this.livenessListeners = livenessListeners;
+		this.livenessDispatch = livenessDispatch;
+	}
+
+	@PreDestroy
+	void stopLivenessDispatch() {
+		if (livenessDispatch instanceof ExecutorService service) {
+			service.shutdown();
+		}
 	}
 
 	// =========================================================
@@ -190,24 +220,33 @@ public class AnomalyDetectionService {
 
 		System.out.println("Charger " + chargerId + " is talking again after " + offlineFor + " sec");
 
-		for (ChargerLivenessListener listener : livenessListeners) {
-			try {
-				listener.cameBack(chargerId, heardAt);
-			} catch (Exception e) {
-				// Detection must keep working when a store is down; the failure is reported, not hidden.
-				System.err.println("Liveness listener failed for " + chargerId + ": " + e);
-			}
-		}
+		dispatch(chargerId, listener -> listener.cameBack(chargerId, heardAt));
 	}
 
 	private void notifyWentSilent(String chargerId, LocalDateTime silentSince, LocalDateTime detectedAt) {
+		dispatch(chargerId, listener -> listener.wentSilent(chargerId, silentSince, detectedAt));
+	}
 
-		for (ChargerLivenessListener listener : livenessListeners) {
-			try {
-				listener.wentSilent(chargerId, silentSince, detectedAt);
-			} catch (Exception e) {
-				System.err.println("Liveness listener failed for " + chargerId + ": " + e);
-			}
+	/**
+	 * Hands a liveness transition to the listeners without holding the charger's lock during their I/O.
+	 * A slow or unavailable Redis/MySQL must not stall ingestion for the charger or the fleet-wide sweep.
+	 */
+	private void dispatch(String chargerId, Consumer<ChargerLivenessListener> call) {
+		if (livenessListeners.isEmpty())
+			return;
+		try {
+			livenessDispatch.execute(() -> {
+				for (ChargerLivenessListener listener : livenessListeners) {
+					try {
+						call.accept(listener);
+					} catch (Exception e) {
+						// Detection must keep working when a store is down; the failure is reported, not hidden.
+						System.err.println("Liveness listener failed for " + chargerId + ": " + e);
+					}
+				}
+			});
+		} catch (RejectedExecutionException e) {
+			System.err.println("Liveness update for " + chargerId + " dropped: dispatcher is shutting down");
 		}
 	}
 

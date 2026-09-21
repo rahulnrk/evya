@@ -14,6 +14,9 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -57,7 +60,7 @@ class AnomalyDetectionSweepTest {
         anomalies = mock(ChargerAnomalyRepository.class);
         when(anomalies.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
         liveness = new RecordingListener();
-        service = new AnomalyDetectionService(anomalies, List.of(liveness));
+        service = new AnomalyDetectionService(anomalies, List.of(liveness), Runnable::run);
     }
 
     private void heartbeatFrom(String chargerId, LocalDateTime at) {
@@ -204,7 +207,7 @@ class AnomalyDetectionSweepTest {
                 throw new IllegalStateException("redis down");
             }
         };
-        service = new AnomalyDetectionService(anomalies, List.of(broken));
+        service = new AnomalyDetectionService(anomalies, List.of(broken), Runnable::run);
 
         heartbeatFrom("LAB001", T0);
         service.sweep(overdue(), SILENCE_THRESHOLD_SECONDS);
@@ -252,5 +255,40 @@ class AnomalyDetectionSweepTest {
         assertThat(saved.getAllValues())
                 .extracting(ChargerAnomaly::getAnomalyType)
                 .containsExactly(AnomalyType.CHARGING_NO_METER_VALUES, AnomalyType.HEARTBEAT_TIMEOUT);
+    }
+
+    @Test
+    @DisplayName("Liveness I/O runs off the ingest and sweep threads, in the order transitions happened")
+    void livenessCallbacksAreDispatchedInOrderOffThread() throws Exception {
+        List<String> seen = new CopyOnWriteArrayList<>();
+        CountDownLatch delivered = new CountDownLatch(3);
+        ChargerLivenessListener recording = new ChargerLivenessListener() {
+            @Override
+            public void wentSilent(String chargerId, LocalDateTime silentSince, LocalDateTime detectedAt) {
+                seen.add("silent@" + Thread.currentThread().getName());
+                delivered.countDown();
+            }
+
+            @Override
+            public void cameBack(String chargerId, LocalDateTime heardAt) {
+                seen.add("back@" + Thread.currentThread().getName());
+                delivered.countDown();
+            }
+        };
+        AnomalyDetectionService async = new AnomalyDetectionService(anomalies, List.of(recording));
+        service = async;
+        try {
+            heartbeatFrom("LAB001", T0);
+            service.sweep(overdue(), SILENCE_THRESHOLD_SECONDS);
+            LocalDateTime backAt = overdue().plusSeconds(120);
+            heartbeatFrom("LAB001", backAt);
+            service.sweep(backAt.plusSeconds(SILENCE_THRESHOLD_SECONDS + 60), SILENCE_THRESHOLD_SECONDS);
+
+            assertThat(delivered.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(seen).containsExactly(
+                    "silent@sense-liveness", "back@sense-liveness", "silent@sense-liveness");
+        } finally {
+            async.stopLivenessDispatch();
+        }
     }
 }
