@@ -1050,17 +1050,13 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		       // paymentTransaction.setCreateTimeStamp(new Date());
 	   		        paymentTransaction.setAccount(account);
 
-	   		        // Calculate current balance (for top-up, add credit amount to current balance)
-	   		        double newBalance = account.getAccountBalance() + paymentTransaction.getAmtCredit();
-	   		        paymentTransaction.setCurrentBalance(newBalance);
-
-	   		        System.out.println("Saving transaction...");
-	   		        // Save the transaction using generalDao
+	   		        // PAY-001 (S0): do NOT credit the wallet on order-create. The Razorpay order is unverified
+	   		        // (status CREATED); the credit happens only in the signature-verified, idempotent
+	   		        // capture path (updatePaymentStatus). Record the transaction against the current
+	   		        // balance without changing it.
+	   		        paymentTransaction.setCurrentBalance(account.getAccountBalance());
+	   		        System.out.println("Saving CREATED payment transaction (no credit until verified)...");
 	   		        AccountTransactions savedTransaction = (AccountTransactions) generalDao.save(paymentTransaction);
-	   		        
-	   		        // Update account balance using generalDao
-	   		        account.setAccountBalance(newBalance);
-	   		        generalDao.save(account);
 	   		        
 	   		        System.out.println("Payment transaction created successfully: " + savedTransaction.getId());
 
@@ -1074,7 +1070,8 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		}
 
 	   		// Method to create actual Razorpay order
-	   		private String createRazorpayOrder(Double amount) throws Exception {
+	   		// Package-visible so a test can override it without constructing a real Razorpay client (PAY-001 tests).
+	   		protected String createRazorpayOrder(Double amount) throws Exception {
 	   		    try {
 	   		        // Initialize Razorpay client from configured keys (env / application.properties)
 	   		        RazorpayClient razorpay = new RazorpayClient(razorPayKey, razorpaySecret);
@@ -1129,61 +1126,92 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		@Transactional(propagation = Propagation.NOT_SUPPORTED)
 	   		public String updatePaymentStatus(PaymentRequestDTO callbackDTO) {
 	   		    try {
-	   		        System.out.println("=== Payment Callback Received in Service ===");
-	   		        System.out.println("Callback DTO: " + callbackDTO);
-	   		        
 	   		        String razorpayOrderId = callbackDTO.getRazorpay_order_id();
 	   		        String razorpayPaymentId = callbackDTO.getRazorpay_payment_id();
 	   		        String razorpaySignature = callbackDTO.getRazorpay_signature();
-	   		        
-	   		        System.out.println("Order ID: " + razorpayOrderId);
-	   		        System.out.println("Payment ID: " + razorpayPaymentId);
-	   		        System.out.println("Signature: " + razorpaySignature);
-	   		        
+
 	   		        if (razorpayOrderId == null || razorpayOrderId.isEmpty()) {
 	   		            throw new RuntimeException("Razorpay order ID is required");
 	   		        }
-	   		        
-	   		        // Use the working query from your logs
+
+	   		        // PAY-001: find the transaction by its exact order id (stored as transactionId on create).
 	   		        AccountTransactions transaction = generalDao.findOneSQLQuery(new AccountTransactions(),
-	   		                "SELECT * FROM account_transaction WHERE comment LIKE :cmt",
-	   		                java.util.Collections.singletonMap("cmt", "%" + razorpayOrderId + "%"));
-	   		        
-	   		        if (transaction != null) {
-	   		            System.out.println("Transaction found with ID: " + transaction.getId());
-	   		            
-	   		            // Determine status
-	   		            String status = "COMPLETED";
-	   		            if (callbackDTO.getError() != null || razorpayPaymentId == null) {
-	   		                status = "FAILED";
-	   		            }
-	   		            
-	   		            // Update transaction
-	   		            transaction.setStatus(status);
-	   		            String comment = "Payment " + status.toLowerCase() + " - Order: " + razorpayOrderId + 
-	   		                           ", Payment ID: " + razorpayPaymentId;
-	   		            
-	   		            if (razorpaySignature != null) {
-	   		                comment += ", Signature: " + razorpaySignature;
-	   		            }
-	   		            
-	   		            if (callbackDTO.getError() != null) {
-	   		                comment += ", Error: " + callbackDTO.getError();
-	   		            }
-	   		            
-	   		            transaction.setComment(comment);
-	   		            generalDao.update(transaction);
-	   		            
-	   		            System.out.println("Transaction status updated to: " + status);
-	   		            return "Payment status updated successfully for order: " + razorpayOrderId + ". Status: " + status;
-	   		        } else {
+	   		                "SELECT * FROM account_transaction WHERE transactionId = :orderId",
+	   		                java.util.Collections.singletonMap("orderId", razorpayOrderId));
+	   		        if (transaction == null) {
 	   		            throw new RuntimeException("Transaction not found for order ID: " + razorpayOrderId);
 	   		        }
+
+	   		        // Idempotent by order id: credit at most once. A repeated/duplicate callback for an
+	   		        // already-completed order does nothing.
+	   		        if ("COMPLETED".equalsIgnoreCase(transaction.getStatus())) {
+	   		            return "Payment already completed for order: " + razorpayOrderId;
+	   		        }
+
+	   		        // A failed/aborted payment, or a callback that fails signature verification, never credits.
+	   		        boolean verified = callbackDTO.getError() == null
+	   		                && razorpayPaymentId != null && !razorpayPaymentId.isEmpty()
+	   		                && verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
+
+	   		        if (!verified) {
+	   		            transaction.setStatus("FAILED");
+	   		            transaction.setComment("Payment failed/unverified - Order: " + razorpayOrderId
+	   		                    + ", Payment ID: " + razorpayPaymentId);
+	   		            generalDao.update(transaction);
+	   		            logger.warn("PAY-001: refusing to credit order {} - payment not verified", razorpayOrderId);
+	   		            return "Payment not verified for order: " + razorpayOrderId + ". Status: FAILED";
+	   		        }
+
+	   		        // Verified: credit the wallet exactly once, now.
+	   		        Accounts account = generalDao.findOneSQLQuery(new Accounts(),
+	   		                "SELECT a.* FROM accounts a JOIN account_transaction t ON t.account_id = a.id "
+	   		                        + "WHERE t.transactionId = :orderId",
+	   		                java.util.Collections.singletonMap("orderId", razorpayOrderId));
+	   		        if (account == null) {
+	   		            throw new RuntimeException("Account not found for order ID: " + razorpayOrderId);
+	   		        }
+
+	   		        double newBalance = account.getAccountBalance() + transaction.getAmtCredit();
+	   		        account.setAccountBalance(newBalance);
+	   		        generalDao.save(account);
+
+	   		        transaction.setStatus("COMPLETED");
+	   		        transaction.setCurrentBalance(newBalance);
+	   		        transaction.setComment("Payment completed - Order: " + razorpayOrderId
+	   		                + ", Payment ID: " + razorpayPaymentId);
+	   		        generalDao.update(transaction);
+
+	   		        logger.info("PAY-001: credited order {} (amount {}); new balance {}",
+	   		                razorpayOrderId, transaction.getAmtCredit(), newBalance);
+	   		        return "Payment status updated successfully for order: " + razorpayOrderId + ". Status: COMPLETED";
+	   		    } catch (RuntimeException e) {
+	   		        throw e;
 	   		    } catch (Exception e) {
-	   		        System.err.println("Error in updatePaymentStatus: " + e.getMessage());
 	   		        throw new RuntimeException("Failed to update payment status: " + e.getMessage());
 	   		    }
 	   		}
+
+	   		/**
+	   		 * PAY-001: verifies the Razorpay payment signature (HMAC-SHA256 of "order_id|payment_id" with the
+	   		 * key secret). A missing secret or any error verifies as false, so an unverifiable callback never
+	   		 * credits the wallet.
+	   		 */
+	   		private boolean verifyRazorpaySignature(String orderId, String paymentId, String signature) {
+	   		    if (signature == null || signature.isEmpty() || razorpaySecret == null || razorpaySecret.isEmpty()) {
+	   		        return false;
+	   		    }
+	   		    try {
+	   		        JSONObject options = new JSONObject();
+	   		        options.put("razorpay_order_id", orderId);
+	   		        options.put("razorpay_payment_id", paymentId);
+	   		        options.put("razorpay_signature", signature);
+	   		        return com.razorpay.Utils.verifyPaymentSignature(options, razorpaySecret);
+	   		    } catch (Exception e) {
+	   		        logger.warn("PAY-001: signature verification error for order {}: {}", orderId, e.getMessage());
+	   		        return false;
+	   		    }
+	   		}
+
 	   		@Override
 	   		public String capturePayment(String paymentId, int amount) throws Exception {
 	   		    try {
