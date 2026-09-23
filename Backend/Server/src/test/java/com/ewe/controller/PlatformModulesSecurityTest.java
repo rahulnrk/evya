@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -29,6 +30,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import com.ewe.config.WebSecurityConfig;
 import com.ewe.platform.ProductModule;
 import com.ewe.platform.VendorModuleService;
+import com.ewe.platform.VendorPlan;
 import com.ewe.security.JwtAuthenticationFilter;
 import com.ewe.security.JwtTokenProvider;
 
@@ -130,5 +132,41 @@ class PlatformModulesSecurityTest {
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.vendorId").value(7))
 				.andExpect(jsonPath("$.modules[0]").value("ocpi"));
+	}
+
+	@Test
+	void platformAdminOnboardsAVendorOntoAPlan() throws Exception {
+		mockMvc.perform(post("/services/platform/vendors/7/onboard").param("plan", "ROAMING")
+						.header("Authorization", bearer(ADMIN_USER, 1)))
+				.andExpect(status().isOk());
+
+		verify(vendorModules).onboard(7L, VendorPlan.ROAMING, ADMIN_USER);
+	}
+
+	@Test
+	void onboardDefaultsToStandardWhenNoPlanGiven() throws Exception {
+		mockMvc.perform(post("/services/platform/vendors/7/onboard")
+						.header("Authorization", bearer(ADMIN_USER, 1)))
+				.andExpect(status().isOk());
+
+		verify(vendorModules).onboard(7L, VendorPlan.STANDARD, ADMIN_USER);
+	}
+
+	@Test
+	void vendorAdminsCannotOnboard() throws Exception {
+		mockMvc.perform(post("/services/platform/vendors/7/onboard").param("plan", "FULL")
+						.header("Authorization", bearer(VENDOR_USER, 3)))
+				.andExpect(status().isForbidden());
+		verify(vendorModules, org.mockito.Mockito.never())
+				.onboard(org.mockito.ArgumentMatchers.anyLong(),
+						org.mockito.ArgumentMatchers.any(VendorPlan.class),
+						org.mockito.ArgumentMatchers.anyLong());
+	}
+
+	@Test
+	void anUnknownPlanIsRejected() throws Exception {
+		mockMvc.perform(post("/services/platform/vendors/7/onboard").param("plan", "platinum")
+						.header("Authorization", bearer(ADMIN_USER, 1)))
+				.andExpect(status().isBadRequest());
 	}
 }

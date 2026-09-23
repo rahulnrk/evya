@@ -61,6 +61,9 @@ public class UserServiceImpl implements UserService {
 	
 	@Autowired
 	private EmailService emailservice;
+
+	@Autowired
+	private com.ewe.platform.VendorModuleService vendorModuleService;
 	@PersistenceContext
 	private EntityManager entityManager;
 	
@@ -237,6 +240,14 @@ public class UserServiceImpl implements UserService {
 		generalDao.save(usrs_orgs);
 
 		updatingRoleId("WhiteLabel", user.getId(), user);
+
+		// ADR-003: a new vendor starts with its catalogue module defaults, made explicit so they show and
+		// can be edited from day one. Onboarding failure must not fail vendor creation.
+		try {
+			vendorModuleService.onboard(orgDetails.getId(), com.ewe.platform.VendorPlan.STANDARD, user.getId());
+		} catch (Exception e) {
+			logger.error("Failed to seed module defaults for vendor " + orgDetails.getId(), e);
+		}
 		try {
 		    emailservice.sendEmailWithTemplate(user.getEmail(), user.getFullname());
 		} catch (Exception e) {

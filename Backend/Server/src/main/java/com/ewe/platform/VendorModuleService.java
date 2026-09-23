@@ -5,8 +5,10 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +42,7 @@ public class VendorModuleService {
 			"SELECT o.whitelabelId AS vendorId FROM users_in_owners u JOIN owner_orgs o ON o.id = u.owner_org_id "
 					+ "WHERE u.user_id = :userId";
 	private static final String VENDOR_EXISTS = "SELECT id FROM white_lable_orgs WHERE id = :vendorId";
+	private static final String KEYS_OF_VENDOR = "SELECT moduleKey FROM vendor_modules WHERE vendorId = :vendorId";
 
 	private final GeneralDao generalDao;
 	private final int adminRoleId;
@@ -133,6 +136,44 @@ public class VendorModuleService {
 		}
 		List<Map<String, Object>> found = generalDao.getMapDataWithParam(VENDOR_EXISTS, params("vendorId", vendorId));
 		return found != null && !found.isEmpty();
+	}
+
+	/**
+	 * Onboards a vendor onto a plan (ADR-003): the plan's modules are set explicitly, and every module a
+	 * plan does not name is seeded to its catalogue default only if the vendor has no row for it yet. Safe
+	 * to re-run; it never overturns a later operator change to a module the plan does not name.
+	 *
+	 * @return the effective module set after onboarding
+	 */
+	@Transactional
+	public Map<ProductModule, Boolean> onboard(Long vendorId, VendorPlan plan, Long actorUserId) {
+		if (vendorId == null) {
+			throw new IllegalArgumentException("vendorId is required to onboard a vendor");
+		}
+		Set<String> existing = existingModuleKeys(vendorId);
+		for (ProductModule module : ProductModule.values()) {
+			boolean named = plan.enabledModules().contains(module);
+			if (named) {
+				setModule(vendorId, module, true, actorUserId);
+			} else if (!existing.contains(module.getKey())) {
+				setModule(vendorId, module, plan.enables(module), actorUserId);
+			}
+		}
+		return effectiveModules(vendorId);
+	}
+
+	private Set<String> existingModuleKeys(Long vendorId) {
+		Set<String> keys = new HashSet<String>();
+		List<Map<String, Object>> rows = generalDao.getMapDataWithParam(KEYS_OF_VENDOR, params("vendorId", vendorId));
+		if (rows != null) {
+			for (Map<String, Object> row : rows) {
+				Object key = row.get("moduleKey");
+				if (key != null) {
+					keys.add(String.valueOf(key));
+				}
+			}
+		}
+		return keys;
 	}
 
 	/** Switches a module on or off for a vendor, recording who did it and when. */

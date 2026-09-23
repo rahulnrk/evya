@@ -14,11 +14,14 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.ewe.platform.ModuleState;
 import com.ewe.platform.ModuleToggle;
 import com.ewe.platform.ProductModule;
+import com.ewe.platform.VendorPlan;
 import com.ewe.platform.VendorModuleService;
 
 /**
@@ -75,6 +78,25 @@ public class PlatformModulesController {
 	 * The signed-in user's vendor and modules, read from the database so a change shows in the portal
 	 * without signing in again. Services that trust the token see it at the next sign-in.
 	 */
+	/**
+	 * Onboards a vendor onto a plan in one call (ADR-003): STANDARD (catalogue defaults), ROAMING (adds
+	 * OCPI), or FULL. Platform admin only. The OCPI party stays self-service — the vendor sets its own
+	 * network identity in the OCPI tab.
+	 */
+	@PostMapping("/platform/vendors/{vendorId}/onboard")
+	public ResponseEntity<?> onboard(@PathVariable Long vendorId,
+			@RequestParam(name = "plan", required = false) String planKey, Authentication authentication) {
+		if (!vendorModules.vendorExists(vendorId)) {
+			return ResponseEntity.notFound().build();
+		}
+		VendorPlan plan = VendorPlan.fromKey(planKey);
+		if (plan == null) {
+			return ResponseEntity.badRequest().body(message("Unknown plan: " + planKey));
+		}
+		vendorModules.onboard(vendorId, plan, userIdOf(authentication));
+		return ResponseEntity.ok(stateOf(vendorId));
+	}
+
 	@GetMapping("/me/modules")
 	public Map<String, Object> myModules(Authentication authentication) {
 		Integer roleId = roleIdOf(authentication);
