@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.ewe.dao.GeneralDao;
@@ -145,7 +146,10 @@ public class VendorModuleService {
 	 *
 	 * @return the effective module set after onboarding
 	 */
-	@Transactional
+	// REQUIRES_NEW: onboarding runs in its own transaction. Called from the @Transactional vendor-signup
+	// flow, a shared transaction would let an onboarding failure mark the whole signup rollback-only even
+	// though the caller swallows the exception. Its own transaction isolates that failure.
+	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public Map<ProductModule, Boolean> onboard(Long vendorId, VendorPlan plan, Long actorUserId) {
 		if (vendorId == null) {
 			throw new IllegalArgumentException("vendorId is required to onboard a vendor");
