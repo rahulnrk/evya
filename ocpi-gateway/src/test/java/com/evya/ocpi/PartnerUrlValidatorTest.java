@@ -63,4 +63,27 @@ class PartnerUrlValidatorTest {
     void labProfileAllowsLoopback() {
         assertThat(lab.validate("http://127.0.0.1:8099/partner/versions").getPort()).isEqualTo(8099);
     }
+
+    @Test
+    @DisplayName("Carrier-grade NAT and IPv4-mapped IPv6 internal targets are refused")
+    void cgnatAndMappedIpv6AreRefused() {
+        for (String url : new String[]{
+                "https://100.64.0.1/versions",
+                "https://100.100.100.200/latest/meta-data",
+                "https://100.127.255.254/versions",
+                "https://[::ffff:127.0.0.1]/versions",
+                "https://[::ffff:10.0.0.1]/versions"}) {
+            assertThatThrownBy(() -> strict.validate(url))
+                    .as("should refuse %s", url)
+                    .isInstanceOf(OcpiException.class)
+                    .hasMessageContaining("publicly routable");
+        }
+    }
+
+    @Test
+    @DisplayName("A public 100.x address outside the CGNAT block is still accepted")
+    void publicHundredBlockIsAccepted() {
+        // 100.0.0.1 is outside 100.64.0.0/10, so it must not be caught by the CGNAT rule.
+        assertThat(strict.validate("https://100.0.0.1/versions").getHost()).isEqualTo("100.0.0.1");
+    }
 }

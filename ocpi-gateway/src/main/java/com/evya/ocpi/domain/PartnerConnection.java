@@ -80,9 +80,15 @@ public class PartnerConnection {
     @Column(nullable = false, length = 16)
     private ConnectionStatus status = ConnectionStatus.PENDING;
 
-    /** Which side began the handshake. Existing rows are invitations (we issued Token A). */
+    /**
+     * Which side began the handshake. Existing rows are invitations (we issued Token A).
+     *
+     * <p>columnDefinition carries a SQL default so that {@code ddl-auto=update} adding this NOT NULL
+     * column to a table that already has rows (from the invite flow) succeeds on MySQL's strict mode;
+     * the Java default alone is invisible to schema generation.
+     */
     @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 8)
+    @Column(nullable = false, length = 8, columnDefinition = "varchar(8) default 'INBOUND'")
     private ConnectionDirection direction = ConnectionDirection.INBOUND;
 
     @Column(name = "created_at", nullable = false)
