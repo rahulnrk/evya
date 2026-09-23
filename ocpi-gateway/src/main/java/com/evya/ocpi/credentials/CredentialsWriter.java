@@ -2,6 +2,7 @@ package com.evya.ocpi.credentials;
 
 import com.evya.ocpi.api.OcpiException;
 import com.evya.ocpi.api.OcpiStatus;
+import com.evya.ocpi.domain.ConnectionDirection;
 import com.evya.ocpi.domain.ConnectionStatus;
 import com.evya.ocpi.domain.OcpiRole;
 import com.evya.ocpi.domain.PartnerConnection;
@@ -69,6 +70,53 @@ public class CredentialsWriter {
         endpoints.deleteByConnection(connection);
         endpoints.flush();
 
+        for (PartnerVersionClient.PartnerModule module : partnerInterface.modules()) {
+            PartnerEndpoint endpoint = new PartnerEndpoint();
+            endpoint.setConnection(connection);
+            endpoint.setIdentifier(module.identifier());
+            endpoint.setRole(module.role());
+            endpoint.setUrl(module.url());
+            endpoints.save(endpoint);
+        }
+    }
+
+    /**
+     * Persists a partner-initiated registration (ADR-003 D5), where the partner issued Token A and we
+     * initiated the exchange.
+     *
+     * @param connection        a fresh connection for the vendor's party
+     * @param ourTokenForPartner the token we minted and sent the partner; they call us with it (hashed
+     *                           for lookup, encrypted so GET /credentials can return it)
+     * @param partnerToken       the token the partner returned; we call them with it (encrypted)
+     * @param partnerCredentials the partner's credentials object (their url and roles)
+     * @param partnerInterface   the partner's discovered endpoints
+     */
+    @Transactional
+    public void completeOutboundRegistration(PartnerConnection connection, String ourTokenForPartner,
+                                             String partnerToken, CredentialsDto partnerCredentials,
+                                             CredentialsRoleDto partnerRole,
+                                             PartnerVersionClient.PartnerInterface partnerInterface) {
+
+        connection.setDirection(ConnectionDirection.OUTBOUND);
+        connection.setPartnerCountryCode(partnerRole.countryCode().toUpperCase(Locale.ROOT));
+        connection.setPartnerPartyId(partnerRole.partyId().toUpperCase(Locale.ROOT));
+        connection.setPartnerRole(toRole(partnerRole.role()));
+        connection.setPartnerBusinessName(partnerRole.businessDetails() == null
+                ? null : partnerRole.businessDetails().name());
+        connection.setPartnerVersionsUrl(partnerCredentials.url());
+        connection.setPartnerTokenEncrypted(tokenCipher.encrypt(partnerToken));
+        connection.setAgreedVersion(partnerInterface.version());
+
+        connection.setTokenCHash(tokenHasher.hash(ourTokenForPartner));
+        connection.setTokenCEncrypted(tokenCipher.encrypt(ourTokenForPartner));
+        // The partner issued Token A out of band; we never hold it as an inbound credential.
+        connection.setTokenAHash(null);
+        connection.setStatus(ConnectionStatus.REGISTERED);
+        connection.setRegisteredAt(Instant.now());
+        connections.save(connection);
+
+        endpoints.deleteByConnection(connection);
+        endpoints.flush();
         for (PartnerVersionClient.PartnerModule module : partnerInterface.modules()) {
             PartnerEndpoint endpoint = new PartnerEndpoint();
             endpoint.setConnection(connection);

@@ -5,9 +5,11 @@ import com.evya.ocpi.domain.OcpiParty;
 import com.evya.ocpi.domain.OcpiRole;
 import com.evya.ocpi.domain.PartnerConnection;
 import com.evya.ocpi.domain.repo.OcpiPartyRepository;
+import com.evya.ocpi.credentials.PartnerRegistrationService;
 import com.evya.ocpi.domain.repo.PartnerConnectionRepository;
 import com.evya.ocpi.security.TokenGenerator;
 import com.evya.ocpi.security.TokenHasher;
+import com.evya.ocpi.api.OcpiException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -35,14 +37,18 @@ public class PortalOcpiService {
     private final OcpiRole defaultRole;
     private final String baseUrl;
 
+    private final PartnerRegistrationService partnerRegistration;
+
     public PortalOcpiService(OcpiPartyRepository parties, PartnerConnectionRepository connections,
                              TokenGenerator tokenGenerator, TokenHasher tokenHasher,
+                             PartnerRegistrationService partnerRegistration,
                              @Value("${ocpi.default-role:CPO}") String defaultRole,
                              @Value("${ocpi.public-base-url}") String baseUrl) {
         this.parties = parties;
         this.connections = connections;
         this.tokenGenerator = tokenGenerator;
         this.tokenHasher = tokenHasher;
+        this.partnerRegistration = partnerRegistration;
         this.defaultRole = OcpiRole.valueOf(defaultRole.toUpperCase(Locale.ROOT));
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
     }
@@ -110,6 +116,27 @@ public class PortalOcpiService {
                         + "the handshake completes, and cannot be recovered.");
     }
 
+    /**
+     * Registers this vendor with a partner or hub that issued a Token A (ADR-003 D5). The partner is
+     * contacted before anything is stored, so a failure surfaces to the vendor with no partial state.
+     */
+    public PortalDtos.ConnectionView registerWithPartner(Long vendorId, PortalDtos.RegisterRequest request) {
+        OcpiParty party = parties.findByTenantId(vendorId).stream().findFirst()
+                .orElseThrow(() -> new PortalException("Set up your OCPI party before connecting to a partner"));
+
+        PartnerConnection connection = new PartnerConnection();
+        connection.setParty(party);
+        connection.setPartnerBusinessName(request.partnerLabel());
+        try {
+            partnerRegistration.registerWithPartner(connection, request.versionsUrl(), request.token());
+        } catch (OcpiException e) {
+            // The gateway's OCPI status becomes a plain message the CMS shows; nothing was persisted.
+            throw new PortalException(e.getMessage());
+        }
+        log.info("Vendor {} registered with a partner (connection {})", vendorId, connection.getId());
+        return view(connection);
+    }
+
     /** Ends a connection: its tokens are destroyed. Scoped to the vendor's own party. */
     @Transactional
     public void revoke(Long vendorId, Long connectionId) {
@@ -138,8 +165,8 @@ public class PortalOcpiService {
     }
 
     private PortalDtos.ConnectionView view(PartnerConnection c) {
-        return new PortalDtos.ConnectionView(c.getId(), c.getPartnerCountryCode(), c.getPartnerPartyId(),
-                c.getPartnerRole(), c.getPartnerBusinessName(), c.getStatus(), c.getAgreedVersion(),
+        return new PortalDtos.ConnectionView(c.getId(), c.getDirection(), c.getPartnerCountryCode(),
+                c.getPartnerPartyId(), c.getPartnerRole(), c.getPartnerBusinessName(), c.getStatus(), c.getAgreedVersion(),
                 c.getRegisteredAt(), c.getLastSeenAt());
     }
 

@@ -102,6 +102,43 @@ public class PartnerVersionClient {
         return new PartnerInterface(OcpiVersion.V2_2_1, modules);
     }
 
+    /**
+     * Completes the partner-initiated handshake: POSTs our credentials object to the partner's
+     * credentials endpoint, authenticated with the Token A the partner issued us. Returns the partner's
+     * own credentials object (their token for us to call them with, their versions url, their roles).
+     *
+     * @throws OcpiException if the partner has no credentials endpoint, or the POST is rejected
+     */
+    public JsonNode postCredentials(PartnerInterface partnerInterface, String tokenA, String ourCredentialsJson) {
+        String credentialsUrl = null;
+        for (PartnerModule module : partnerInterface.modules()) {
+            if ("credentials".equalsIgnoreCase(module.identifier())) {
+                credentialsUrl = module.url();
+                break;
+            }
+        }
+        if (credentialsUrl == null) {
+            throw new OcpiException(OcpiStatus.NO_MATCHING_ENDPOINTS,
+                    "The partner published no credentials endpoint");
+        }
+
+        URI uri = urlValidator.validate(credentialsUrl);
+        HttpRequest request = HttpRequest.newBuilder(uri)
+                .POST(HttpRequest.BodyPublishers.ofString(ourCredentialsJson, StandardCharsets.UTF_8))
+                .timeout(readTimeout)
+                .header("Authorization", "Token " + base64(tokenA))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .build();
+        JsonNode body = send(request, uri);
+        JsonNode data = body.path("data");
+        if (data.isMissingNode() || data.path("token").asText(null) == null) {
+            throw new OcpiException(OcpiStatus.UNABLE_TO_USE_CLIENT_API,
+                    "The partner's credentials response had no token");
+        }
+        return data;
+    }
+
     private JsonNode get(URI uri, String partnerToken) {
         HttpRequest request = HttpRequest.newBuilder(uri)
                 .GET()
@@ -109,6 +146,10 @@ public class PartnerVersionClient {
                 .header("Authorization", "Token " + base64(partnerToken))
                 .header("Accept", "application/json")
                 .build();
+        return send(request, uri);
+    }
+
+    private JsonNode send(HttpRequest request, URI uri) {
         try {
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() < 200 || response.statusCode() >= 300) {

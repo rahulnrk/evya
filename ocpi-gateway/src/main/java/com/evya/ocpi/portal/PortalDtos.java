@@ -1,5 +1,6 @@
 package com.evya.ocpi.portal;
 
+import com.evya.ocpi.domain.ConnectionDirection;
 import com.evya.ocpi.domain.ConnectionStatus;
 import com.evya.ocpi.domain.OcpiRole;
 import jakarta.validation.constraints.NotBlank;
@@ -40,6 +41,16 @@ public final class PortalDtos {
     public record InviteRequest(String partnerLabel) {
     }
 
+    /**
+     * Register with a partner or hub that issued us a Token A (ADR-003 D5). The vendor enters the
+     * partner's versions URL and the one-time token they were given.
+     */
+    public record RegisterRequest(
+            @jakarta.validation.constraints.NotBlank String versionsUrl,
+            @jakarta.validation.constraints.NotBlank String token,
+            String partnerLabel) {
+    }
+
     /** The Token A, shown once, for a human to hand to the partner out of band. */
     public record InviteResult(
             Long connectionId,
@@ -50,6 +61,7 @@ public final class PortalDtos {
 
     public record ConnectionView(
             Long id,
+            ConnectionDirection direction,
             String partnerCountryCode,
             String partnerPartyId,
             OcpiRole partnerRole,

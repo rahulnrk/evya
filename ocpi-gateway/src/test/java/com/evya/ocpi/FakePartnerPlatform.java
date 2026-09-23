@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -26,11 +27,14 @@ final class FakePartnerPlatform implements AutoCloseable {
     private volatile boolean versionsBroken;
     private volatile CyclicBarrier versionsBarrier;
     private volatile String extraModuleUrl;
+    private volatile String receivedCredentialsBody;
+    private volatile boolean credentialsReturnsBadBody;
 
     FakePartnerPlatform() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/partner/versions", this::versions);
         server.createContext("/partner/2.2.1", this::versionDetails);
+        server.createContext("/partner/2.2.1/credentials", this::credentials);
         // More than one thread: concurrency tests hold several requests open at once.
         server.setExecutor(executor);
         server.start();
@@ -61,6 +65,40 @@ final class FakePartnerPlatform implements AutoCloseable {
     /** Publishes an extra "locations" endpoint at the given URL. */
     void publishModuleUrl(String url) {
         this.extraModuleUrl = url;
+    }
+
+    /** What we received at POST /credentials, or null if it was never called. */
+    String receivedCredentialsBody() {
+        return receivedCredentialsBody;
+    }
+
+    /** Make the credentials endpoint answer with a token-less body, to test our validation. */
+    void credentialsReturnsBadBody() {
+        this.credentialsReturnsBadBody = true;
+    }
+
+    /**
+     * The partner side of a partner-initiated handshake: receives EVYA's credentials POST (authenticated
+     * with the Token A this partner issued) and returns the partner's own credentials object.
+     */
+    private void credentials(HttpExchange exchange) throws IOException {
+        seenAuthorization.add(exchange.getRequestHeaders().getFirst("Authorization"));
+        try (InputStream in = exchange.getRequestBody()) {
+            receivedCredentialsBody = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        if (credentialsReturnsBadBody) {
+            respond(exchange, 200, """
+                    {"data":{"url":"%s/partner/versions","roles":[]},
+                     "status_code":1000,"status_message":"Success","timestamp":"2026-09-23T00:00:00Z"}
+                    """.formatted(baseUrl()));
+            return;
+        }
+        respond(exchange, 200, """
+                {"data":{"token":"partner-issued-token-for-evya","url":"%s/partner/versions",
+                   "roles":[{"role":"CPO","party_id":"HUB","country_code":"NL",
+                             "business_details":{"name":"Hub Operator"}}]},
+                 "status_code":1000,"status_message":"Success","timestamp":"2026-09-23T00:00:00Z"}
+                """.formatted(baseUrl()));
     }
 
     private void versions(HttpExchange exchange) throws IOException {

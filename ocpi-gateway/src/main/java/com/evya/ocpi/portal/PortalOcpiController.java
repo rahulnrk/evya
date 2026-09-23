@@ -62,6 +62,13 @@ public class PortalOcpiController {
         return service.invite(vendor, request == null ? new PortalDtos.InviteRequest(null) : request);
     }
 
+    @PostMapping("/connections/register")
+    public PortalDtos.ConnectionView register(Authentication authentication,
+                                              @RequestParam(required = false) Long vendorId,
+                                              @Valid @RequestBody PortalDtos.RegisterRequest request) {
+        return service.registerWithPartner(resolveVendor(authentication, vendorId), request);
+    }
+
     @DeleteMapping("/connections/{connectionId}")
     public ResponseEntity<Void> revoke(Authentication authentication,
                                        @RequestParam(required = false) Long vendorId,

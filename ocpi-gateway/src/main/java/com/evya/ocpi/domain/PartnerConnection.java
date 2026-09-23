@@ -80,6 +80,11 @@ public class PartnerConnection {
     @Column(nullable = false, length = 16)
     private ConnectionStatus status = ConnectionStatus.PENDING;
 
+    /** Which side began the handshake. Existing rows are invitations (we issued Token A). */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 8)
+    private ConnectionDirection direction = ConnectionDirection.INBOUND;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt = Instant.now();
 
@@ -151,6 +156,10 @@ public class PartnerConnection {
     public ConnectionStatus getStatus() { return status; }
 
     public void setStatus(ConnectionStatus v) { this.status = v; }
+
+    public ConnectionDirection getDirection() { return direction; }
+
+    public void setDirection(ConnectionDirection v) { this.direction = v; }
 
     public Instant getCreatedAt() { return createdAt; }
 
