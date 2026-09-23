@@ -1123,7 +1123,8 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		}
 	   		
 	   		@Override
-	   		@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	   		// PAY-001: REQUIRED so the atomic status-claim and the balance credit commit together.
+	   		@Transactional(propagation = Propagation.REQUIRED)
 	   		public String updatePaymentStatus(PaymentRequestDTO callbackDTO) {
 	   		    try {
 	   		        String razorpayOrderId = callbackDTO.getRazorpay_order_id();
@@ -1153,36 +1154,37 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		                && razorpayPaymentId != null && !razorpayPaymentId.isEmpty()
 	   		                && verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature);
 
+	   		        java.util.Map<String, Object> params = new java.util.HashMap<String, Object>();
+	   		        params.put("orderId", razorpayOrderId);
+
 	   		        if (!verified) {
-	   		            transaction.setStatus("FAILED");
-	   		            transaction.setComment("Payment failed/unverified - Order: " + razorpayOrderId
-	   		                    + ", Payment ID: " + razorpayPaymentId);
-	   		            generalDao.update(transaction);
+	   		            // Only a CREATED order may move to FAILED; never clobber an already-COMPLETED credit.
+	   		            generalDao.queryExecuteWithParam(
+	   		                    "UPDATE account_transaction SET status = 'FAILED' "
+	   		                            + "WHERE transactionId = :orderId AND status = 'CREATED'", params);
 	   		            logger.warn("PAY-001: refusing to credit order {} - payment not verified", razorpayOrderId);
 	   		            return "Payment not verified for order: " + razorpayOrderId + ". Status: FAILED";
 	   		        }
 
-	   		        // Verified: credit the wallet exactly once, now.
-	   		        Accounts account = generalDao.findOneSQLQuery(new Accounts(),
-	   		                "SELECT a.* FROM accounts a JOIN account_transaction t ON t.account_id = a.id "
-	   		                        + "WHERE t.transactionId = :orderId",
-	   		                java.util.Collections.singletonMap("orderId", razorpayOrderId));
-	   		        if (account == null) {
-	   		            throw new RuntimeException("Account not found for order ID: " + razorpayOrderId);
+	   		        // Atomically CLAIM the order: exactly one caller flips CREATED -> COMPLETED. A duplicate or
+	   		        // concurrent callback affects 0 rows and credits nothing (idempotent by order id, race-safe
+	   		        // even without a unique constraint, because the row lock serialises the conditional update).
+	   		        int claimed = generalDao.queryExecuteWithParam(
+	   		                "UPDATE account_transaction SET status = 'COMPLETED', comment = :comment "
+	   		                        + "WHERE transactionId = :orderId AND status = 'CREATED'",
+	   		                withComment(params, "Payment completed - Order: " + razorpayOrderId
+	   		                        + ", Payment ID: " + razorpayPaymentId));
+	   		        if (claimed != 1) {
+	   		            return "Payment already completed for order: " + razorpayOrderId;
 	   		        }
 
-	   		        double newBalance = account.getAccountBalance() + transaction.getAmtCredit();
-	   		        account.setAccountBalance(newBalance);
-	   		        generalDao.save(account);
+	   		        // We won the claim: credit the wallet with a single atomic UPDATE (no read-modify-write).
+	   		        generalDao.queryExecuteWithParam(
+	   		                "UPDATE accounts SET accountBalance = accountBalance + :amt "
+	   		                        + "WHERE id = (SELECT account_id FROM account_transaction WHERE transactionId = :orderId)",
+	   		                withAmount(params, transaction.getAmtCredit()));
 
-	   		        transaction.setStatus("COMPLETED");
-	   		        transaction.setCurrentBalance(newBalance);
-	   		        transaction.setComment("Payment completed - Order: " + razorpayOrderId
-	   		                + ", Payment ID: " + razorpayPaymentId);
-	   		        generalDao.update(transaction);
-
-	   		        logger.info("PAY-001: credited order {} (amount {}); new balance {}",
-	   		                razorpayOrderId, transaction.getAmtCredit(), newBalance);
+	   		        logger.info("PAY-001: credited order {} (amount {})", razorpayOrderId, transaction.getAmtCredit());
 	   		        return "Payment status updated successfully for order: " + razorpayOrderId + ". Status: COMPLETED";
 	   		    } catch (RuntimeException e) {
 	   		        throw e;
@@ -1196,7 +1198,19 @@ public List<Map<String, Object>> VerifyOtp(String phoneNo, String otp) {
 	   		 * key secret). A missing secret or any error verifies as false, so an unverifiable callback never
 	   		 * credits the wallet.
 	   		 */
-	   		private boolean verifyRazorpaySignature(String orderId, String paymentId, String signature) {
+	   		private static java.util.Map<String, Object> withComment(java.util.Map<String, Object> base, String comment) {
+	   		    java.util.Map<String, Object> m = new java.util.HashMap<String, Object>(base);
+	   		    m.put("comment", comment);
+	   		    return m;
+	   		}
+
+	   		private static java.util.Map<String, Object> withAmount(java.util.Map<String, Object> base, double amt) {
+	   		    java.util.Map<String, Object> m = new java.util.HashMap<String, Object>(base);
+	   		    m.put("amt", amt);
+	   		    return m;
+	   		}
+
+	   			   		private boolean verifyRazorpaySignature(String orderId, String paymentId, String signature) {
 	   		    if (signature == null || signature.isEmpty() || razorpaySecret == null || razorpaySecret.isEmpty()) {
 	   		        return false;
 	   		    }

@@ -4,6 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -87,11 +90,13 @@ class PaymentPay001Test {
     void verifiedCallback_creditsOnce() throws Exception {
         Fixture f = new Fixture();
 
+        when(f.generalDao.queryExecuteWithParam(contains("SET status = 'COMPLETED'"), any())).thenReturn(1);
+
         String result = f.service.updatePaymentStatus(f.callback(sign(ORDER_ID, PAYMENT_ID, SECRET), null));
 
         assertThat(result).contains("COMPLETED");
-        assertThat(f.account.getAccountBalance()).isEqualTo(INITIAL_BALANCE + TOP_UP_AMOUNT);
-        assertThat(f.transaction.getStatus()).isEqualTo("COMPLETED");
+        // Credited exactly once, with a single atomic balance UPDATE.
+        verify(f.generalDao, times(1)).queryExecuteWithParam(contains("SET accountBalance = accountBalance + :amt"), any());
     }
 
     @Test
@@ -99,14 +104,14 @@ class PaymentPay001Test {
     void repeatedCallback_doesNotDoubleCredit() throws Exception {
         Fixture f = new Fixture();
         String signature = sign(ORDER_ID, PAYMENT_ID, SECRET);
+        // The atomic claim succeeds once, then affects 0 rows for the duplicate callback.
+        when(f.generalDao.queryExecuteWithParam(contains("SET status = 'COMPLETED'"), any())).thenReturn(1, 0);
 
         f.service.updatePaymentStatus(f.callback(signature, null));
         String second = f.service.updatePaymentStatus(f.callback(signature, null));
 
         assertThat(second).contains("already completed");
-        assertThat(f.account.getAccountBalance())
-                .as("idempotent by order id: credited once only")
-                .isEqualTo(INITIAL_BALANCE + TOP_UP_AMOUNT);
+        verify(f.generalDao, times(1)).queryExecuteWithParam(contains("SET accountBalance = accountBalance + :amt"), any());
     }
 
     @Test
@@ -117,10 +122,8 @@ class PaymentPay001Test {
         String result = f.service.updatePaymentStatus(f.callback("deadbeefforgedsignature", null));
 
         assertThat(result).contains("FAILED");
-        assertThat(f.account.getAccountBalance())
-                .as("a forged signature must never credit")
-                .isEqualTo(INITIAL_BALANCE);
-        assertThat(f.transaction.getStatus()).isEqualTo("FAILED");
+        verify(f.generalDao, never()).queryExecuteWithParam(contains("SET accountBalance = accountBalance + :amt"), any());
+        verify(f.generalDao, times(1)).queryExecuteWithParam(contains("SET status = 'FAILED'"), any());
     }
 
     @Test
@@ -131,7 +134,7 @@ class PaymentPay001Test {
         String result = f.service.updatePaymentStatus(f.callback(sign(ORDER_ID, PAYMENT_ID, SECRET), "user_cancelled"));
 
         assertThat(result).contains("FAILED");
-        assertThat(f.account.getAccountBalance()).isEqualTo(INITIAL_BALANCE);
+        verify(f.generalDao, never()).queryExecuteWithParam(contains("SET accountBalance = accountBalance + :amt"), any());
     }
 
     // ---- helpers ----
@@ -139,23 +142,16 @@ class PaymentPay001Test {
     /** A service whose DAO returns a CREATED transaction + account for ORDER_ID, with the test secret set. */
     private static final class Fixture {
         final MobileAPIServiceImpl service = new TestService();
-        final Accounts account = new Accounts();
         final AccountTransactions transaction = new AccountTransactions();
+        final GeneralDao generalDao = mock(GeneralDao.class);
 
         @SuppressWarnings({ "unchecked", "rawtypes" })
         Fixture() throws Exception {
-            account.setAccountBalance(INITIAL_BALANCE);
             transaction.setStatus("CREATED");
             transaction.setTransactionId(ORDER_ID);
             transaction.setAmtCredit(TOP_UP_AMOUNT);
-            transaction.setAccount(account);
 
-            GeneralDao generalDao = mock(GeneralDao.class);
             when(generalDao.findOneSQLQuery(any(), contains("FROM account_transaction"), any())).thenReturn(transaction);
-            when(generalDao.findOneSQLQuery(any(), contains("FROM accounts"), any())).thenReturn(account);
-            when(generalDao.save(any())).thenAnswer(inv -> inv.getArgument(0));
-            when(generalDao.update(any())).thenAnswer(inv -> inv.getArgument(0));
-
             injectField(service, "generalDao", generalDao);
             injectField(service, "razorpaySecret", SECRET);
             injectField(service, "razorPayKey", "rzp_test_key");
