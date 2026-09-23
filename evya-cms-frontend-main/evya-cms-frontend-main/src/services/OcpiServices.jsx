@@ -25,6 +25,9 @@ const OcpiServices = {
   getConnections: (vendorId) => ocpiApi.get(scoped("/portal/ocpi/connections", vendorId)),
   invitePartner: (partnerLabel, vendorId) =>
     ocpiApi.post(scoped("/portal/ocpi/connections/invite", vendorId), { partnerLabel }),
+  // ADR-003 D5: register with a partner/hub that issued us a one-time token.
+  registerWithPartner: (body, vendorId) =>
+    ocpiApi.post(scoped("/portal/ocpi/connections/register", vendorId), body),
   revokeConnection: (connectionId, vendorId) =>
     ocpiApi.delete(scoped(`/portal/ocpi/connections/${connectionId}`, vendorId)),
 };

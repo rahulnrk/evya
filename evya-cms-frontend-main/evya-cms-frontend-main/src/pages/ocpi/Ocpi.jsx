@@ -51,6 +51,8 @@ export default function Ocpi() {
   const [inviteLabel, setInviteLabel] = useState("");
   const [inviting, setInviting] = useState(false);
   const [invite, setInvite] = useState(null); // { tokenA, versionsUrl, handoverNote }
+  const [registerForm, setRegisterForm] = useState({ versionsUrl: "", token: "", partnerLabel: "" });
+  const [registering, setRegistering] = useState(false);
 
   const load = useCallback(async () => {
     if (!vendorChosen) return;
@@ -111,6 +113,25 @@ export default function Ocpi() {
       toast({ variant: "destructive", title: "Could not create the invitation", description: errorText(e, "") });
     } finally {
       setInviting(false);
+    }
+  };
+
+  const registerWithPartner = async () => {
+    setRegistering(true);
+    try {
+      await OcpiServices.registerWithPartner(
+        { versionsUrl: registerForm.versionsUrl.trim(), token: registerForm.token.trim(),
+          partnerLabel: registerForm.partnerLabel || null },
+        activeVendor,
+      );
+      setRegisterForm({ versionsUrl: "", token: "", partnerLabel: "" });
+      toast({ title: "Registered with the partner" });
+      load();
+    } catch (e) {
+      // The gateway returns a plain reason (unreachable, bad response, disallowed URL): show it.
+      toast({ variant: "destructive", title: "Could not register with the partner", description: errorText(e, "") });
+    } finally {
+      setRegistering(false);
     }
   };
 
@@ -220,10 +241,38 @@ export default function Ocpi() {
                 <p className="text-sm text-slate-500">Create your party before inviting partners.</p>
               )}
 
+              <div className="rounded-md border p-3 space-y-3 bg-slate-50">
+                <div className="text-sm font-medium">Connect to a partner or hub that gave you a token</div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <Label htmlFor="pv">Partner versions URL</Label>
+                    <Input id="pv" value={registerForm.versionsUrl}
+                           onChange={(e) => setRegisterForm({ ...registerForm, versionsUrl: e.target.value })}
+                           placeholder="https://partner.example/ocpi/versions" />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="pt">One-time token</Label>
+                    <Input id="pt" value={registerForm.token}
+                           onChange={(e) => setRegisterForm({ ...registerForm, token: e.target.value })} />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="pl">Label (optional)</Label>
+                    <Input id="pl" value={registerForm.partnerLabel}
+                           onChange={(e) => setRegisterForm({ ...registerForm, partnerLabel: e.target.value })}
+                           placeholder="e.g. Roaming Hub" />
+                  </div>
+                </div>
+                <Button onClick={registerWithPartner}
+                        disabled={registering || !party || !registerForm.versionsUrl.trim() || !registerForm.token.trim()}>
+                  {registering ? "Connecting…" : "Connect"}
+                </Button>
+              </div>
+
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Partner</TableHead>
+                    <TableHead>Direction</TableHead>
                     <TableHead>Party</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead>Version</TableHead>
@@ -233,11 +282,12 @@ export default function Ocpi() {
                 </TableHeader>
                 <TableBody>
                   {connections.length === 0 && (
-                    <TableRow><TableCell colSpan={6} className="text-slate-500">No partners yet.</TableCell></TableRow>
+                    <TableRow><TableCell colSpan={7} className="text-slate-500">No partners yet.</TableCell></TableRow>
                   )}
                   {connections.map((c) => (
                     <TableRow key={c.id}>
                       <TableCell>{c.partnerBusinessName || "—"}</TableCell>
+                      <TableCell>{c.direction === "OUTBOUND" ? "We joined" : "We invited"}</TableCell>
                       <TableCell>
                         {c.partnerCountryCode ? `${c.partnerCountryCode}*${c.partnerPartyId}` : "—"}
                       </TableCell>
